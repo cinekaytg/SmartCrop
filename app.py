@@ -600,10 +600,23 @@ if page == "Overview":
         map_view = folium.Map(
             location=[st.session_state.selected_lat, st.session_state.selected_lon],
             zoom_start=2 if st.session_state.climate_location is None else 5,
-            tiles="OpenStreetMap",
+            tiles=None,
             min_zoom=1,
             max_zoom=18,
+            control_scale=True,
         )
+        # Use Esri's World Street Map instead of the default OSM tiles.
+        # This basemap generally uses English map labels for international viewers.
+        folium.TileLayer(
+            tiles=(
+                "https://server.arcgisonline.com/ArcGIS/rest/services/"
+                "World_Street_Map/MapServer/tile/{z}/{y}/{x}"
+            ),
+            attr="Tiles © Esri — Sources: Esri, TomTom, Garmin, FAO, NOAA, USGS",
+            name="World Street Map (English labels)",
+            overlay=False,
+            control=False,
+        ).add_to(map_view)
         folium.Marker(
             [st.session_state.selected_lat, st.session_state.selected_lon],
             tooltip="Selected SmartCrop location",
