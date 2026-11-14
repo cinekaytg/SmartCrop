@@ -10,6 +10,13 @@ import plotly.express as px
 import streamlit as st
 from streamlit_folium import st_folium
 
+st.set_page_config(
+    page_title="SmartCrop | Field Intelligence",
+    page_icon="🌱",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
 APP_DIR = Path(__file__).resolve().parent
 DB_PATH = APP_DIR / "smartcrop.db"
 DEFAULT_LAT, DEFAULT_LON = 36.8969, 30.7133
@@ -31,9 +38,13 @@ def fetch_nasa_power_monthly(latitude, longitude, year=2025):
     response = requests.get(endpoint, params=params, timeout=45)
     response.raise_for_status()
     payload = response.json()
+    if payload.get("messages"):
+        messages = payload.get("messages")
+        if isinstance(messages, list) and messages:
+            raise ValueError("; ".join(str(item) for item in messages))
     parameter_data = payload.get("properties", {}).get("parameter", {})
     if not parameter_data:
-        raise ValueError("NASA POWER returned no parameter data for this location.")
+        raise ValueError("NASA POWER returned no parameter data for this location. Try another point.")
 
     frames = []
     for parameter, values in parameter_data.items():
@@ -42,7 +53,7 @@ def fetch_nasa_power_monthly(latitude, longitude, year=2025):
         frames.append(series)
 
     daily = pd.concat(frames, axis=1).sort_index()
-    daily = daily.replace([-999, -999.0], pd.NA).apply(pd.to_numeric, errors="coerce")
+    daily = daily.apply(pd.to_numeric, errors="coerce").replace(-999, float("nan"))
     daily = daily.dropna(how="all")
     if daily.empty:
         raise ValueError("NASA POWER returned no valid daily observations for this location.")
@@ -61,13 +72,6 @@ def fetch_nasa_power_monthly(latitude, longitude, year=2025):
         monthly = monthly.rename(columns={monthly.columns[0]: "month_date"})
     monthly["year_month"] = monthly["month_date"].dt.strftime("%Y-%m")
     return monthly[["year_month", "avg_temperature", "total_rainfall", "avg_solar_radiation"]]
-
-st.set_page_config(
-    page_title="SmartCrop | Field Intelligence",
-    page_icon="🌱",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
 
 st.markdown("""
 <style>
@@ -175,6 +179,17 @@ except Exception as exc:
     st.error(f"Could not open the database: {exc}")
     st.stop()
 
+# Global point selection. Climate data are fetched for the selected point;
+# existing soil/crop/rotation tables remain the Antalya pilot dataset for now.
+if "selected_lat" not in st.session_state:
+    st.session_state.selected_lat = DEFAULT_LAT
+if "selected_lon" not in st.session_state:
+    st.session_state.selected_lon = DEFAULT_LON
+if "selected_climate" not in st.session_state:
+    st.session_state.selected_climate = pd.DataFrame()
+if "climate_location" not in st.session_state:
+    st.session_state.climate_location = None
+
 with st.sidebar:
     st.markdown("# 🌱 SmartCrop")
     st.caption("NASA Space Apps Challenge")
@@ -203,17 +218,6 @@ suit = data("crop_suitability_assessment")
 rotation = data("crop_rotation_candidates")
 root = data("crop_root_zone_water")
 
-# Global point selection. Climate data are fetched for the selected point;
-# existing soil/crop/rotation tables remain the Antalya pilot dataset for now.
-if "selected_lat" not in st.session_state:
-    st.session_state.selected_lat = DEFAULT_LAT
-if "selected_lon" not in st.session_state:
-    st.session_state.selected_lon = DEFAULT_LON
-if "selected_climate" not in st.session_state:
-    st.session_state.selected_climate = pd.DataFrame()
-if "climate_location" not in st.session_state:
-    st.session_state.climate_location = None
-
 if page == "Overview":
     hero(
         "Smarter decisions for healthier fields.",
@@ -225,7 +229,7 @@ if page == "Overview":
         if score_col else 0
     )
     a, b, c, d = st.columns(4)
-    a.metric("Pilot location", "Antalya")
+    a.metric("Selected point", "Global")
     b.metric("Climate records", f"{len(climate)} months" if not climate.empty else "Unavailable")
     c.metric("Scored crops", str(valid_scores))
     d.metric("Rotation candidates", str(len(rotation)))
@@ -570,7 +574,7 @@ elif page == "Data Sources":
     limitations = [
         "Selected-point climate data are fetched from NASA POWER for 2025; they are not a long-term climate normal or a weather forecast.",
         "NASA POWER grid resolution varies by parameter; nearby selected points may return the same grid-cell data.",
-        "The current interactive global selection updates climate data only. Soil, crop suitability, and rotation tables remain based on the Antalya pilot dataset.",
+        "The current interactive global selection updates climate data only. Soil, crop suitability, and rotation tables remain based on the Antalya pilot dataset until location-specific soil data are connected.",
         "SoilGrids values are gridded estimates and have not been validated with field soil samples.",
         "The selected pH value is a nearest-valid-pixel estimate; its pixel distance is not recorded in the current site summary.",
         "Rainfall fit compares one observed calendar year's rainfall with ECOCROP reference ranges. It is not irrigation demand.",
