@@ -1,11 +1,11 @@
 import sqlite3
+import itertools
 from pathlib import Path
 from datetime import date
 
 import requests
 
 import folium
-import itertools
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -319,16 +319,34 @@ if page == "Overview":
         "Smarter decisions for healthier fields.",
         "Explore satellite-derived climate and soil information, compare crop requirements, and review transparent rotation scenarios.",
     )
-    score_col = col(suit, ["preliminary_screening_score", "preliminary_score"])
+    overview_location_current = (
+        not st.session_state.selected_climate.empty
+        and st.session_state.climate_location == (
+            st.session_state.selected_lat, st.session_state.selected_lon
+        )
+    )
+    if overview_location_current and not st.session_state.location_suitability.empty:
+        overview_scores = st.session_state.location_suitability.copy()
+        overview_name_col = "Crop"
+        overview_score_col = "Preliminary score"
+        overview_rotation_count = len(st.session_state.location_rotations)
+        overview_climate_count = len(st.session_state.selected_climate)
+    else:
+        overview_scores = suit.copy()
+        overview_name_col = col(overview_scores, ["crop_name_en", "crop_name", "name_en", "crop_id"])
+        overview_score_col = col(overview_scores, ["preliminary_screening_score", "preliminary_score"])
+        overview_rotation_count = len(rotation)
+        overview_climate_count = len(climate)
+
     valid_scores = (
-        pd.to_numeric(suit[score_col], errors="coerce").notna().sum()
-        if score_col else 0
+        pd.to_numeric(overview_scores[overview_score_col], errors="coerce").notna().sum()
+        if overview_score_col and not overview_scores.empty else 0
     )
     a, b, c, d = st.columns(4)
     a.metric("Selected point", "Global")
-    b.metric("Climate records", f"{len(climate)} months" if not climate.empty else "Unavailable")
+    b.metric("Climate records", f"{overview_climate_count} months" if overview_climate_count else "Unavailable")
     c.metric("Scored crops", str(valid_scores))
-    d.metric("Rotation candidates", str(len(rotation)))
+    d.metric("Rotation candidates", str(overview_rotation_count))
 
     left, right = st.columns([1.12, 1])
     with left:
@@ -394,15 +412,24 @@ if page == "Overview":
                 st.success("NASA POWER climate data loaded. Crop screening and rotation scenarios were recalculated using this location's climate and available ECOCROP requirements.")
             except Exception as exc:
                 st.error(f"NASA POWER data could not be loaded: {exc}")
-        st.caption("Global point selection is enabled. Soil and crop results below still use the Antalya pilot dataset.")
+        st.caption(
+            "Climate data and preliminary crop screening update for the selected point. "
+            "Soil analysis remains limited to the Antalya pilot dataset."
+        )
     with right:
         section("Preliminary crop screening")
-        name = col(suit, ["crop_name_en", "crop_name", "name_en", "crop_id"])
-        if score_col and name and not suit.empty:
-            view = suit[[name, score_col]].copy()
-            view[score_col] = pd.to_numeric(view[score_col], errors="coerce")
-            view = view.dropna().sort_values(score_col, ascending=False)
-            view[name] = view[name].map(pretty_crop)
+        if overview_location_current and overview_score_col and overview_name_col:
+            st.caption(
+                f"Live climate-based screening · "
+                f"{st.session_state.selected_lat:.4f}, {st.session_state.selected_lon:.4f}"
+            )
+        else:
+            st.caption("Original Antalya pilot assessment · load climate data for a selected point to refresh")
+        if overview_score_col and overview_name_col and not overview_scores.empty:
+            view = overview_scores[[overview_name_col, overview_score_col]].copy()
+            view[overview_score_col] = pd.to_numeric(view[overview_score_col], errors="coerce")
+            view = view.dropna().sort_values(overview_score_col, ascending=False)
+            view[overview_name_col] = view[overview_name_col].map(pretty_crop)
             view.columns = ["Crop", "Preliminary score"]
             view["Preliminary score"] = view["Preliminary score"].map(lambda x: fmt(x))
             st.dataframe(view, hide_index=True, use_container_width=True)
@@ -636,7 +663,7 @@ elif page == "Data Sources":
         "SoilGrids values are gridded estimates and have not been validated with field soil samples.",
         "The Antalya pilot pH value is a nearest-valid-pixel estimate. It is not reused for other selected locations.",
         "Rainfall fit compares one observed calendar year's rainfall with ECOCROP reference ranges. It is not irrigation demand.",
-        "The preliminary screening score is the equal-weighted mean of rainfall fit and soil pH fit.",
+        "For selected locations, the preliminary climate-only score is the equal-weighted mean of available temperature and annual-rainfall fits; soil pH is excluded until location-specific soil data are connected.",
         "Root-zone water storage is estimated using generalized rooting-depth references and SoilGrids layer values.",
         "Root-zone storage is not plant water uptake at a particular date and is not an irrigation prescription.",
         "The rotation generator does not model field history, planting calendars, pests, diseases, nutrient balances, soil carbon, irrigation, or economics.",
