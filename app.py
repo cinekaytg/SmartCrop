@@ -76,6 +76,125 @@ def fetch_nasa_power_monthly(latitude, longitude, year=2025):
     return monthly[["year_month", "avg_temperature", "total_rainfall", "avg_solar_radiation"]]
 
 
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_nasa_power_climate_normals(latitude, longitude, start_year=1991, end_year=2020):
+    """Fetch monthly NASA POWER records and derive a 30-year monthly reference."""
+    endpoint = "https://power.larc.nasa.gov/api/temporal/monthly/point"
+    params = {
+        "parameters": "T2M,PRECTOTCORR,ALLSKY_SFC_SW_DWN",
+        "community": "AG",
+        "longitude": round(float(longitude), 4),
+        "latitude": round(float(latitude), 4),
+        "start": int(start_year),
+        "end": int(end_year),
+        "format": "JSON",
+    }
+    response = requests.get(endpoint, params=params, timeout=90)
+    response.raise_for_status()
+    payload = response.json()
+    messages = payload.get("messages")
+    if isinstance(messages, list) and messages:
+        raise ValueError("; ".join(str(item) for item in messages))
+
+    parameter_data = payload.get("properties", {}).get("parameter", {})
+    required = ["T2M", "PRECTOTCORR", "ALLSKY_SFC_SW_DWN"]
+    missing = [name for name in required if name not in parameter_data]
+    if missing:
+        raise ValueError("NASA POWER monthly response is missing: " + ", ".join(missing))
+
+    series_list = []
+    for parameter in required:
+        series = pd.Series(parameter_data[parameter], name=parameter)
+        series.index = pd.to_datetime(series.index.astype(str), format="%Y%m", errors="coerce")
+        series = pd.to_numeric(series, errors="coerce").replace(-999, float("nan"))
+        series_list.append(series)
+
+    history = pd.concat(series_list, axis=1).sort_index()
+    history = history.loc[~history.index.isna()].dropna(how="all")
+    if history.empty:
+        raise ValueError("NASA POWER returned no valid monthly observations.")
+
+    history = history.reset_index().rename(columns={
+        "index": "month_date",
+        "T2M": "avg_temperature",
+        "PRECTOTCORR": "mean_daily_rainfall",
+        "ALLSKY_SFC_SW_DWN": "avg_solar_radiation",
+    })
+    if "month_date" not in history.columns:
+        history = history.rename(columns={history.columns[0]: "month_date"})
+
+    history["year"] = history["month_date"].dt.year
+    history["month_number"] = history["month_date"].dt.month
+    history["days_in_month"] = history["month_date"].dt.days_in_month
+    history["year_month"] = history["month_date"].dt.strftime("%Y-%m")
+
+    for column in ["avg_temperature", "mean_daily_rainfall", "avg_solar_radiation"]:
+        history[column] = pd.to_numeric(history[column], errors="coerce")
+        history.loc[history[column] <= -900, column] = float("nan")
+
+    # NASA POWER monthly precipitation is a mean daily rate (mm/day).
+    history["total_rainfall"] = history["mean_daily_rainfall"] * history["days_in_month"]
+
+    valid_years = history.dropna(
+        subset=["avg_temperature", "total_rainfall"]
+    )["year"].nunique()
+    if valid_years < 25:
+        raise ValueError(
+            f"Only {valid_years} valid years were returned; at least 25 are required."
+        )
+
+    month_names = {
+        1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
+        7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec",
+    }
+    normals = (
+        history.groupby("month_number", as_index=False)
+        .agg(
+            avg_temperature=("avg_temperature", "mean"),
+            total_rainfall=("total_rainfall", "mean"),
+            avg_solar_radiation=("avg_solar_radiation", "mean"),
+            days_in_month=("days_in_month", "mean"),
+            years_available=("year", "nunique"),
+        )
+        .sort_values("month_number")
+    )
+    normals["month"] = normals["month_number"].map(month_names)
+    normals["year_month"] = normals["month"]
+    normals["mean_daily_rainfall"] = normals["total_rainfall"] / normals["days_in_month"]
+
+    annual_rows = []
+    for year, group in history.groupby("year"):
+        valid_temp = group["avg_temperature"].notna()
+        weighted_temp = (
+            (group.loc[valid_temp, "avg_temperature"] * group.loc[valid_temp, "days_in_month"]).sum()
+            / group.loc[valid_temp, "days_in_month"].sum()
+            if valid_temp.any() else float("nan")
+        )
+        annual_rows.append({
+            "year": int(year),
+            "annual_mean_temperature": weighted_temp,
+            "annual_total_rainfall": group["total_rainfall"].sum(min_count=1),
+            "annual_mean_solar_radiation": group["avg_solar_radiation"].mean(),
+            "valid_months": int(
+                group[["avg_temperature", "total_rainfall"]].notna().all(axis=1).sum()
+            ),
+        })
+    annual = pd.DataFrame(annual_rows).sort_values("year")
+
+    if len(normals) != 12:
+        raise ValueError(f"Expected 12 monthly normals, received {len(normals)}.")
+
+    return {
+        "monthly_normals": normals,
+        "monthly_history": history,
+        "annual_summary": annual,
+        "period": f"{start_year}–{end_year}",
+        "valid_years": int(valid_years),
+    }
+
+
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_soilgrids_point(latitude, longitude):
     """
@@ -300,8 +419,20 @@ def build_location_suitability(climate_df, ecological, catalog, soil_ph=None):
     rain_col = col(climate_df, ["total_rainfall"])
     if not temp_col or not rain_col:
         return pd.DataFrame()
-    annual_temp = pd.to_numeric(climate_df[temp_col], errors="coerce").mean()
-    annual_rain = pd.to_numeric(climate_df[rain_col], errors="coerce").sum()
+    temperature_values = pd.to_numeric(climate_df[temp_col], errors="coerce")
+    rainfall_values = pd.to_numeric(climate_df[rain_col], errors="coerce")
+    days_col = col(climate_df, ["days_in_month"])
+    if days_col:
+        day_weights = pd.to_numeric(climate_df[days_col], errors="coerce")
+        valid_temp = temperature_values.notna() & day_weights.notna()
+        annual_temp = (
+            (temperature_values[valid_temp] * day_weights[valid_temp]).sum()
+            / day_weights[valid_temp].sum()
+            if valid_temp.any() else float("nan")
+        )
+    else:
+        annual_temp = temperature_values.mean()
+    annual_rain = rainfall_values.sum(min_count=1)
     rows = []
     for _, crop in ecological.iterrows():
         temp_score = range_fit(
@@ -379,6 +510,12 @@ if "selected_lon" not in st.session_state:
     st.session_state.selected_lon = DEFAULT_LON
 if "selected_climate" not in st.session_state:
     st.session_state.selected_climate = pd.DataFrame()
+if "selected_climate_history" not in st.session_state:
+    st.session_state.selected_climate_history = pd.DataFrame()
+if "selected_annual_climate" not in st.session_state:
+    st.session_state.selected_annual_climate = pd.DataFrame()
+if "climate_period" not in st.session_state:
+    st.session_state.climate_period = None
 if "climate_location" not in st.session_state:
     st.session_state.climate_location = None
 if "location_suitability" not in st.session_state:
@@ -489,6 +626,9 @@ if page == "Overview":
                 st.session_state.selected_lat = new_lat
                 st.session_state.selected_lon = new_lon
                 st.session_state.selected_climate = pd.DataFrame()
+                st.session_state.selected_climate_history = pd.DataFrame()
+                st.session_state.selected_annual_climate = pd.DataFrame()
+                st.session_state.climate_period = None
                 st.session_state.climate_location = None
                 st.session_state.location_suitability = pd.DataFrame()
                 st.session_state.location_rotations = pd.DataFrame()
@@ -503,11 +643,20 @@ if page == "Overview":
         )
         if st.button("Load climate data for this location", type="primary", use_container_width=True):
             try:
-                with st.spinner("Requesting NASA POWER data for the selected coordinates..."):
-                    result = fetch_nasa_power_monthly(
-                        st.session_state.selected_lat, st.session_state.selected_lon, 2025
+                with st.spinner(
+                    "Requesting 30 years of NASA POWER monthly climate data (1991–2020)..."
+                ):
+                    climate_package = fetch_nasa_power_climate_normals(
+                        st.session_state.selected_lat,
+                        st.session_state.selected_lon,
+                        1991,
+                        2020,
                     )
+                result = climate_package["monthly_normals"]
                 st.session_state.selected_climate = result
+                st.session_state.selected_climate_history = climate_package["monthly_history"]
+                st.session_state.selected_annual_climate = climate_package["annual_summary"]
+                st.session_state.climate_period = climate_package["period"]
                 st.session_state.climate_location = (
                     st.session_state.selected_lat, st.session_state.selected_lon
                 )
@@ -527,10 +676,10 @@ if page == "Overview":
                 st.session_state.location_rotations = build_location_rotations(
                     st.session_state.location_suitability
                 )
-                st.success("NASA POWER climate data loaded. Crop screening and rotation scenarios were recalculated using this location's climate and available ECOCROP requirements.")
+                st.success("NASA POWER 30-year climate reference data loaded. Crop screening and rotation scenarios were recalculated using the 1991–2020 climate baseline and available ECOCROP requirements.")
             except Exception as exc:
                 st.error(f"NASA POWER data could not be loaded: {exc}")
-        st.caption("Global point selection is enabled. Soil and crop results below still use the Antalya pilot dataset.")
+        st.caption("Global point selection is enabled. Climate screening uses a 1991–2020 NASA POWER reference period; SoilGrids data are retrieved separately for the selected point.")
     with right:
         section("Preliminary crop screening")
         if overview_location_current and overview_score_col and overview_name_col:
@@ -554,14 +703,14 @@ if page == "Overview":
         else:
             st.info("Crop screening results are not available.")
     st.info(
-        "Climate data can be requested for a selected global point and currently use 2025 observations. "
-        "The series is not a long-term climate normal or a weather forecast. Soil and crop analyses still use the Antalya pilot dataset."
+        "Climate data can be requested for a selected global point and use a 1991–2020, 30-year reference period. "
+        "The reference period is a historical climate baseline, not a forecast. NASA POWER grid resolution varies by parameter; SoilGrids data are retrieved separately for the selected point."
     )
 
 elif page == "Climate Analysis":
     hero(
         "Climate analysis",
-        "Monthly climate indicators derived from NASA POWER daily observations.",
+        "30-year monthly climate reference derived from NASA POWER monthly observations.",
     )
     selected_is_current = (
         not st.session_state.selected_climate.empty
@@ -572,53 +721,87 @@ elif page == "Climate Analysis":
     if selected_is_current:
         climate_to_show = st.session_state.selected_climate.copy()
         st.success(
-            f"Showing NASA POWER data for selected coordinates: "
+            f"Showing NASA POWER {st.session_state.climate_period} reference data for "
             f"{st.session_state.selected_lat:.4f}, {st.session_state.selected_lon:.4f}"
         )
+        annual_history = st.session_state.selected_annual_climate.copy()
     else:
-        climate_to_show = climate.copy()
+        climate_to_show = pd.DataFrame()
+        annual_history = pd.DataFrame()
         st.info(
-            "No newly fetched climate data for the selected point yet. "
-            "Go to Overview, select a point on the world map, and click "
-            "'Load climate data for this location'. The table below is the original Antalya pilot dataset."
+            "No long-term climate reference has been loaded for the selected point yet. "
+            "Go to Overview, select a point on the map, and load its NASA POWER climate data."
         )
 
     if climate_to_show.empty:
-        st.warning("Climate data are not available.")
+        st.warning("Long-term climate reference data are not available for this selected point.")
     else:
-        month = col(climate_to_show, ["year_month", "month", "date"])
-        temp = col(climate_to_show, ["avg_temperature", "average_temperature", "mean_temperature"])
-        rain = col(climate_to_show, ["total_rainfall", "total_rainfall_mm", "rainfall_mm"])
-        solar = col(climate_to_show, ["avg_solar_radiation", "average_solar_radiation", "solar_radiation"])
+        month = "month"
         df = climate_to_show.copy()
-        x = month if month else df.index
-        if month:
-            df[month] = df[month].astype(str)
-            df = df.sort_values(month)
-            if df[month].str.match(r"\d{4}-\d{2}").all():
-                df["_month_label"] = pd.to_datetime(df[month] + "-01").dt.strftime("%b %Y")
-                x = "_month_label"
-
         chart_specs = [
-            ("Monthly average temperature", temp, "line", "#23734d", "Temperature (°C)"),
-            ("Monthly total rainfall", rain, "bar", "#4b9b79", "Rainfall (mm)"),
-            ("Monthly average solar radiation", solar, "bar", "#d9a441", "Solar radiation (kWh/m²/day)"),
+            ("30-year mean monthly temperature", "avg_temperature", "line", "#23734d", "Temperature (°C)"),
+            ("Mean monthly precipitation total", "total_rainfall", "bar", "#4b9b79", "Precipitation (mm/month)"),
+            ("Mean daily solar radiation by month", "avg_solar_radiation", "bar", "#d9a441", "Solar radiation (MJ/m²/day)"),
         ]
         for title, y, chart_type, color, axis_title in chart_specs:
-            if y:
+            if y in df.columns:
                 df[y] = pd.to_numeric(df[y], errors="coerce")
                 section(title)
                 if chart_type == "line":
-                    fig = px.line(df, x=x, y=y, markers=True, labels={y: axis_title, x: "Month"})
+                    fig = px.line(
+                        df, x=month, y=y, markers=True,
+                        labels={y: axis_title, month: "Calendar month"}
+                    )
                     fig.update_traces(line_color=color, line_width=3, marker_size=7)
                 else:
-                    fig = px.bar(df, x=x, y=y, labels={y: axis_title, x: "Month"},
-                                 color_discrete_sequence=[color])
-                fig.update_layout(template="plotly_white", height=320, margin=dict(l=15, r=15, t=20, b=15))
+                    fig = px.bar(
+                        df, x=month, y=y,
+                        labels={y: axis_title, month: "Calendar month"},
+                        color_discrete_sequence=[color],
+                    )
+                fig.update_layout(
+                    template="plotly_white", height=320,
+                    margin=dict(l=15, r=15, t=20, b=15),
+                )
                 st.plotly_chart(fig, use_container_width=True)
-        with st.expander("View monthly source data"):
-            st.dataframe(climate_to_show, use_container_width=True, hide_index=True)
-    st.caption("Source: NASA POWER daily point API. Selected-location data are aggregated to monthly values for 2025.")
+
+        if not annual_history.empty:
+            section("Year-to-year climate variability within the reference period")
+            annual_specs = [
+                ("Annual mean temperature", "annual_mean_temperature", "Temperature (°C)", "#23734d"),
+                ("Annual precipitation total", "annual_total_rainfall", "Precipitation (mm/year)", "#4b9b79"),
+            ]
+            for title, value_col, axis_title, color in annual_specs:
+                if value_col in annual_history.columns:
+                    fig = px.line(
+                        annual_history, x="year", y=value_col, markers=True,
+                        labels={value_col: axis_title, "year": "Year"},
+                        title=title,
+                    )
+                    fig.update_traces(line_color=color, line_width=2, marker_size=5)
+                    fig.update_layout(
+                        template="plotly_white", height=300,
+                        margin=dict(l=15, r=15, t=35, b=15),
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+            with st.expander("View annual climate summaries (1991–2020)"):
+                st.dataframe(annual_history, hide_index=True, use_container_width=True)
+
+        with st.expander("View 12-month climate reference table"):
+            st.dataframe(climate_to_show, hide_index=True, use_container_width=True)
+        with st.expander("View underlying monthly observations (1991–2020)"):
+            st.dataframe(
+                st.session_state.selected_climate_history,
+                hide_index=True,
+                use_container_width=True,
+            )
+
+    st.caption(
+        "Source: NASA POWER Monthly Point API. Reference period: 1991–2020. "
+        "Monthly precipitation totals are derived from the returned mean daily precipitation rate "
+        "multiplied by the number of calendar days in each month. This is a historical reference, "
+        "not a forecast."
+    )
 
 elif page == "Soil Analysis":
     hero(
@@ -858,13 +1041,13 @@ elif page == "Data Sources":
 
     section("Methodology and important limitations")
     limitations = [
-        "Selected-point climate data are fetched from NASA POWER for 2025; they are not a long-term climate normal or a weather forecast.",
+        "Selected-point climate data are fetched from the NASA POWER Monthly Point API for the 1991–2020 reference period. This is a historical 30-year baseline, not a forecast.",
         "NASA POWER grid resolution varies by parameter; nearby selected points may return the same grid-cell data.",
         "Global point selection fetches NASA POWER climate data and SoilGrids topsoil estimates. When both are available for the same point, crop screening includes temperature, annual rainfall, and soil pH fits.",
         "SoilGrids 0–5 cm pH and texture values are gridded model estimates and have not been validated with field soil samples.",
         "The Antalya pilot pH value is a nearest-valid-pixel estimate. It is not reused for other selected locations.",
-        "Rainfall fit compares one observed calendar year's rainfall with ECOCROP reference ranges. It is not irrigation demand.",
-        "For a selected location, the preliminary screening score is the equal-weighted mean of available temperature, annual-rainfall, and soil-pH fits. Soil texture is displayed but is not yet scored against ECOCROP texture categories.",
+        "Rainfall fit compares the mean annual precipitation total derived from 1991–2020 monthly climate records with ECOCROP reference ranges. It is not irrigation demand.",
+        "For a selected location, the preliminary screening score is the equal-weighted mean of available temperature, annual-rainfall, and soil-pH fits. Temperature is calculated as a day-weighted mean of the 12 long-term monthly means. Soil texture is displayed but is not yet scored against ECOCROP texture categories.",
         "Root-zone water storage is estimated using generalized rooting-depth references and SoilGrids layer values.",
         "Root-zone storage is not plant water uptake at a particular date and is not an irrigation prescription.",
         "The rotation generator does not model field history, planting calendars, pests, diseases, nutrient balances, soil carbon, irrigation, or economics.",
