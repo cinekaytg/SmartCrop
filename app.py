@@ -1,5 +1,6 @@
 import sqlite3
 import itertools
+import math
 from pathlib import Path
 from datetime import date
 
@@ -73,6 +74,109 @@ def fetch_nasa_power_monthly(latitude, longitude, year=2025):
         monthly = monthly.rename(columns={monthly.columns[0]: "month_date"})
     monthly["year_month"] = monthly["month_date"].dt.strftime("%Y-%m")
     return monthly[["year_month", "avg_temperature", "total_rainfall", "avg_solar_radiation"]]
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_soilgrids_point(latitude, longitude):
+    """
+    Fetch SoilGrids 0-5 cm mean predictions for one point via ISRIC WCS.
+    Returned native integer values are converted to pH and percentage units.
+    """
+    try:
+        import numpy as np
+        import rasterio
+        from rasterio.io import MemoryFile
+        from pyproj import Transformer
+    except ImportError as exc:
+        raise RuntimeError(
+            "SoilGrids dependencies are missing. Install rasterio, pyproj, and numpy."
+        ) from exc
+
+    latitude = float(latitude)
+    longitude = float(longitude)
+    if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+        raise ValueError("Coordinates are outside valid latitude/longitude bounds.")
+
+    # ISRIC's SoilGrids native projection: Interrupted Goode Homolosine.
+    soilgrids_proj = (
+        "+proj=igh +datum=WGS84 +no_defs +towgs84=0,0,0"
+    )
+    transformer = Transformer.from_crs(
+        "EPSG:4326", soilgrids_proj, always_xy=True
+    )
+    x, y = transformer.transform(longitude, latitude)
+    if not (math.isfinite(x) and math.isfinite(y)):
+        raise ValueError("Could not project this coordinate into the SoilGrids grid.")
+
+    # Request a small window around the point at the native 250 m grid scale.
+    half_window = 375.0
+    subsets = [
+        ("SUBSET", f"X({x - half_window},{x + half_window})"),
+        ("SUBSET", f"Y({y - half_window},{y + half_window})"),
+    ]
+    crs_uri = "http://www.opengis.net/def/crs/EPSG/0/152160"
+    properties = {
+        "phh2o": "Soil pH",
+        "sand": "Sand",
+        "silt": "Silt",
+        "clay": "Clay",
+    }
+    results = {}
+
+    for prop, label in properties.items():
+        endpoint = f"https://maps.isric.org/mapserv?map=/map/{prop}.map"
+        params = [
+            ("SERVICE", "WCS"),
+            ("VERSION", "2.0.1"),
+            ("REQUEST", "GetCoverage"),
+            ("COVERAGEID", f"{prop}_0-5cm_mean"),
+            ("FORMAT", "GEOTIFF_INT16"),
+            *subsets,
+            ("SUBSETTINGCRS", crs_uri),
+            ("OUTPUTCRS", crs_uri),
+            ("RESX", "250"),
+            ("RESY", "250"),
+        ]
+        response = requests.get(endpoint, params=params, timeout=75)
+        response.raise_for_status()
+        content = response.content
+        if not content[:4] in (b"II*\x00", b"MM\x00*"):
+            detail = content[:500].decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"SoilGrids did not return a GeoTIFF for {label}. "
+                f"Service response: {detail[:300]}"
+            )
+
+        with MemoryFile(content) as memfile:
+            with memfile.open() as dataset:
+                sample = next(dataset.sample([(x, y)], masked=True))
+                raw_value = sample[0]
+                if np.ma.is_masked(raw_value):
+                    raise ValueError(
+                        f"No SoilGrids estimate is available at this coordinate for {label}."
+                    )
+                raw_value = float(raw_value)
+                if dataset.nodata is not None and raw_value == float(dataset.nodata):
+                    raise ValueError(
+                        f"SoilGrids returned no-data for {label} at this coordinate."
+                    )
+                if (
+                    not math.isfinite(raw_value)
+                    or raw_value < 0
+                    or (prop == "phh2o" and raw_value == 0)
+                ):
+                    raise ValueError(
+                        f"SoilGrids returned an invalid estimate for {label}."
+                    )
+                results[prop] = raw_value / 10.0
+
+    texture_sum = results["sand"] + results["silt"] + results["clay"]
+    results["texture_sum_pct"] = texture_sum
+    results["depth"] = "0–5 cm"
+    results["source"] = "ISRIC SoilGrids 2.0 WCS"
+    results["quantile"] = "Mean"
+    return results
+
 
 st.markdown("""
 <style>
@@ -283,6 +387,10 @@ if "location_rotations" not in st.session_state:
     st.session_state.location_rotations = pd.DataFrame()
 if "location_soil_ph" not in st.session_state:
     st.session_state.location_soil_ph = None
+if "selected_soil" not in st.session_state:
+    st.session_state.selected_soil = None
+if "soil_location" not in st.session_state:
+    st.session_state.soil_location = None
 
 with st.sidebar:
     st.markdown("# 🌱 SmartCrop")
@@ -319,34 +427,16 @@ if page == "Overview":
         "Smarter decisions for healthier fields.",
         "Explore satellite-derived climate and soil information, compare crop requirements, and review transparent rotation scenarios.",
     )
-    overview_location_current = (
-        not st.session_state.selected_climate.empty
-        and st.session_state.climate_location == (
-            st.session_state.selected_lat, st.session_state.selected_lon
-        )
-    )
-    if overview_location_current and not st.session_state.location_suitability.empty:
-        overview_scores = st.session_state.location_suitability.copy()
-        overview_name_col = "Crop"
-        overview_score_col = "Preliminary score"
-        overview_rotation_count = len(st.session_state.location_rotations)
-        overview_climate_count = len(st.session_state.selected_climate)
-    else:
-        overview_scores = suit.copy()
-        overview_name_col = col(overview_scores, ["crop_name_en", "crop_name", "name_en", "crop_id"])
-        overview_score_col = col(overview_scores, ["preliminary_screening_score", "preliminary_score"])
-        overview_rotation_count = len(rotation)
-        overview_climate_count = len(climate)
-
+    score_col = col(suit, ["preliminary_screening_score", "preliminary_score"])
     valid_scores = (
-        pd.to_numeric(overview_scores[overview_score_col], errors="coerce").notna().sum()
-        if overview_score_col and not overview_scores.empty else 0
+        pd.to_numeric(suit[score_col], errors="coerce").notna().sum()
+        if score_col else 0
     )
     a, b, c, d = st.columns(4)
     a.metric("Selected point", "Global")
-    b.metric("Climate records", f"{overview_climate_count} months" if overview_climate_count else "Unavailable")
+    b.metric("Climate records", f"{len(climate)} months" if not climate.empty else "Unavailable")
     c.metric("Scored crops", str(valid_scores))
-    d.metric("Rotation candidates", str(overview_rotation_count))
+    d.metric("Rotation candidates", str(len(rotation)))
 
     left, right = st.columns([1.12, 1])
     with left:
@@ -385,6 +475,8 @@ if page == "Overview":
                 st.session_state.location_suitability = pd.DataFrame()
                 st.session_state.location_rotations = pd.DataFrame()
                 st.session_state.location_soil_ph = None
+                st.session_state.selected_soil = None
+                st.session_state.soil_location = None
                 st.rerun()
 
         st.write(
@@ -403,8 +495,16 @@ if page == "Overview":
                 )
                 # SoilGrids point-query API is currently paused. Do not reuse Antalya pH
                 # for another point. Climate-only screening is explicitly labelled.
+                matching_soil = (
+                    st.session_state.selected_soil
+                    if st.session_state.soil_location == (
+                        st.session_state.selected_lat, st.session_state.selected_lon
+                    ) else None
+                )
+                selected_ph = matching_soil.get("phh2o") if matching_soil else None
+                st.session_state.location_soil_ph = selected_ph
                 st.session_state.location_suitability = build_location_suitability(
-                    result, ecological, catalog, soil_ph=None
+                    result, ecological, catalog, soil_ph=selected_ph
                 )
                 st.session_state.location_rotations = build_location_rotations(
                     st.session_state.location_suitability
@@ -412,24 +512,15 @@ if page == "Overview":
                 st.success("NASA POWER climate data loaded. Crop screening and rotation scenarios were recalculated using this location's climate and available ECOCROP requirements.")
             except Exception as exc:
                 st.error(f"NASA POWER data could not be loaded: {exc}")
-        st.caption(
-            "Climate data and preliminary crop screening update for the selected point. "
-            "Soil analysis remains limited to the Antalya pilot dataset."
-        )
+        st.caption("Global point selection is enabled. Soil and crop results below still use the Antalya pilot dataset.")
     with right:
         section("Preliminary crop screening")
-        if overview_location_current and overview_score_col and overview_name_col:
-            st.caption(
-                f"Live climate-based screening · "
-                f"{st.session_state.selected_lat:.4f}, {st.session_state.selected_lon:.4f}"
-            )
-        else:
-            st.caption("Original Antalya pilot assessment · load climate data for a selected point to refresh")
-        if overview_score_col and overview_name_col and not overview_scores.empty:
-            view = overview_scores[[overview_name_col, overview_score_col]].copy()
-            view[overview_score_col] = pd.to_numeric(view[overview_score_col], errors="coerce")
-            view = view.dropna().sort_values(overview_score_col, ascending=False)
-            view[overview_name_col] = view[overview_name_col].map(pretty_crop)
+        name = col(suit, ["crop_name_en", "crop_name", "name_en", "crop_id"])
+        if score_col and name and not suit.empty:
+            view = suit[[name, score_col]].copy()
+            view[score_col] = pd.to_numeric(view[score_col], errors="coerce")
+            view = view.dropna().sort_values(score_col, ascending=False)
+            view[name] = view[name].map(pretty_crop)
             view.columns = ["Crop", "Preliminary score"]
             view["Preliminary score"] = view["Preliminary score"].map(lambda x: fmt(x))
             st.dataframe(view, hide_index=True, use_container_width=True)
@@ -505,49 +596,113 @@ elif page == "Climate Analysis":
 elif page == "Soil Analysis":
     hero(
         "Soil analysis",
-        "Location-specific soil properties are shown only when data are available for the selected point.",
+        "Location-specific topsoil estimates retrieved from ISRIC SoilGrids.",
     )
-    is_antalla_pilot = (
-        abs(st.session_state.selected_lat - DEFAULT_LAT) < 0.02
-        and abs(st.session_state.selected_lon - DEFAULT_LON) < 0.02
+    selected_point = (
+        st.session_state.selected_lat, st.session_state.selected_lon
     )
-    if is_antalla_pilot:
-        st.info("The selected point is within the Antalya pilot area. The following profile is the existing SoilGrids estimate for the pilot coordinates.")
-        if not soil.empty:
-            section("Antalya pilot site summary")
-            display_soil = soil.copy()
-            display_soil.columns = [str(c).replace("_", " ").title() for c in display_soil.columns]
-            st.dataframe(display_soil, use_container_width=True, hide_index=True)
-        if not profile.empty:
-            section("Soil profile by depth")
-            depth = col(profile, ["depth_label", "depth"])
-            texture_cols = [col(profile, x) for x in ["sand_pct", "silt_pct", "clay_pct"]]
-            texture_cols = [x for x in texture_cols if x]
-            if depth and texture_cols:
-                long = profile[[depth] + texture_cols].melt(
-                    id_vars=depth, var_name="Particle", value_name="Percentage"
-                )
-                long["Particle"] = long["Particle"].map({
-                    "sand_pct": "Sand", "silt_pct": "Silt", "clay_pct": "Clay"
-                }).fillna(long["Particle"])
-                fig = px.bar(long, x="Percentage", y=depth, color="Particle",
-                             orientation="h", barmode="stack",
-                             title="Soil texture by depth (%)")
-                fig.update_layout(template="plotly_white", height=350)
-                st.plotly_chart(fig, use_container_width=True)
-            st.dataframe(profile, hide_index=True, use_container_width=True)
-    else:
-        st.warning(
-            "No verified location-specific soil profile is currently available for this selected point. "
-            "SoilGrids REST point-query service is paused, and the WCS/COG integration has not yet been implemented. "
-            "The Antalya soil profile is intentionally not displayed as if it belonged to this location."
-        )
-        st.markdown(
-            "[SoilGrids data access documentation](https://docs.isric.org/globaldata/soilgrids/wcs.html)"
-        )
+    soil_is_current = (
+        st.session_state.selected_soil is not None
+        and st.session_state.soil_location == selected_point
+    )
+
+    st.write(
+        f"**Selected coordinates:** {selected_point[0]:.4f}, {selected_point[1]:.4f}"
+    )
     st.caption(
-        "SoilGrids provides gridded model estimates, not field measurements. "
-        "A selected coordinate does not guarantee a field-level soil assessment."
+        "Retrieves SoilGrids mean predictions for the 0–5 cm topsoil layer "
+        "at the selected map coordinate."
+    )
+
+    if st.button(
+        "Load SoilGrids data for this location",
+        type="primary",
+        use_container_width=True,
+    ):
+        try:
+            with st.spinner(
+                "Requesting pH, sand, silt, and clay estimates from ISRIC SoilGrids..."
+            ):
+                soil_result = fetch_soilgrids_point(*selected_point)
+            st.session_state.selected_soil = soil_result
+            st.session_state.soil_location = selected_point
+            st.session_state.location_soil_ph = soil_result["phh2o"]
+
+            climate_is_current = (
+                not st.session_state.selected_climate.empty
+                and st.session_state.climate_location == selected_point
+            )
+            if climate_is_current:
+                st.session_state.location_suitability = build_location_suitability(
+                    st.session_state.selected_climate,
+                    ecological,
+                    catalog,
+                    soil_ph=soil_result["phh2o"],
+                )
+                st.session_state.location_rotations = build_location_rotations(
+                    st.session_state.location_suitability
+                )
+            st.success(
+                "SoilGrids data loaded. Soil pH was added to the crop screening "
+                "where climate data are already available."
+            )
+            st.rerun()
+        except Exception as exc:
+            st.error(f"SoilGrids data could not be loaded: {exc}")
+
+    if soil_is_current:
+        soil_values = st.session_state.selected_soil
+        st.success(
+            f"Showing SoilGrids estimates for "
+            f"{selected_point[0]:.4f}, {selected_point[1]:.4f}"
+        )
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Soil pH (H₂O)", fmt(soil_values["phh2o"], 2))
+        m2.metric("Sand", f'{fmt(soil_values["sand"], 1)}%')
+        m3.metric("Silt", f'{fmt(soil_values["silt"], 1)}%')
+        m4.metric("Clay", f'{fmt(soil_values["clay"], 1)}%')
+
+        texture_df = pd.DataFrame({
+            "Soil particle": ["Sand", "Silt", "Clay"],
+            "Percentage": [
+                soil_values["sand"], soil_values["silt"], soil_values["clay"]
+            ],
+        })
+        section("Topsoil texture composition · 0–5 cm")
+        fig = px.bar(
+            texture_df,
+            x="Percentage",
+            y="Soil particle",
+            orientation="h",
+            text_auto=".1f",
+            color="Soil particle",
+            title="Estimated soil texture fractions (%)",
+        )
+        fig.update_layout(
+            template="plotly_white",
+            height=300,
+            showlegend=False,
+            margin=dict(l=15, r=15, t=35, b=15),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.caption(
+            f"Texture fractions total: {fmt(soil_values['texture_sum_pct'], 1)}%. "
+            "Small differences from 100% can occur because these are independently "
+            "modelled estimates."
+        )
+        st.caption(
+            "Source: ISRIC SoilGrids 2.0 WCS · 250 m grid · mean prediction · 0–5 cm. "
+            "These are model estimates, not field measurements."
+        )
+    else:
+        st.info(
+            "No SoilGrids result has been loaded for this selected coordinate yet. "
+            "Click the button above to retrieve the local topsoil estimates."
+        )
+
+    st.markdown(
+        "[SoilGrids WCS documentation](https://docs.isric.org/globaldata/soilgrids/wcs.html)"
     )
 
 elif page == "Crop Suitability":
@@ -659,11 +814,11 @@ elif page == "Data Sources":
     limitations = [
         "Selected-point climate data are fetched from NASA POWER for 2025; they are not a long-term climate normal or a weather forecast.",
         "NASA POWER grid resolution varies by parameter; nearby selected points may return the same grid-cell data.",
-        "Global point selection fetches NASA POWER climate data. Crop screening and rotation are recalculated from climate data and ECOCROP requirements; soil pH is excluded unless location-specific soil data are available.",
-        "SoilGrids values are gridded estimates and have not been validated with field soil samples.",
+        "Global point selection fetches NASA POWER climate data and SoilGrids topsoil estimates. When both are available for the same point, crop screening includes temperature, annual rainfall, and soil pH fits.",
+        "SoilGrids 0–5 cm pH and texture values are gridded model estimates and have not been validated with field soil samples.",
         "The Antalya pilot pH value is a nearest-valid-pixel estimate. It is not reused for other selected locations.",
         "Rainfall fit compares one observed calendar year's rainfall with ECOCROP reference ranges. It is not irrigation demand.",
-        "For selected locations, the preliminary climate-only score is the equal-weighted mean of available temperature and annual-rainfall fits; soil pH is excluded until location-specific soil data are connected.",
+        "For a selected location, the preliminary screening score is the equal-weighted mean of available temperature, annual-rainfall, and soil-pH fits. Soil texture is displayed but is not yet scored against ECOCROP texture categories.",
         "Root-zone water storage is estimated using generalized rooting-depth references and SoilGrids layer values.",
         "Root-zone storage is not plant water uptake at a particular date and is not an irrigation prescription.",
         "The rotation generator does not model field history, planting calendars, pests, diseases, nutrient balances, soil carbon, irrigation, or economics.",

@@ -4,3 +4,6 @@ plotly
 folium
 streamlit-folium
 requests
+numpy
+rasterio
+pyproj
