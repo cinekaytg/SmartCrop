@@ -4,12 +4,14 @@ from pathlib import Path
 import folium
 import pandas as pd
 import plotly.express as px
+import requests
 import streamlit as st
 from streamlit_folium import st_folium
 
 APP_DIR = Path(__file__).resolve().parent
 DB_PATH = APP_DIR / "smartcrop.db"
-LAT, LON = 36.8969, 30.7133
+DEFAULT_LAT, DEFAULT_LON = 36.8969, 30.7133
+NASA_POWER_URL = "https://power.larc.nasa.gov/api/temporal/daily/point"
 
 st.set_page_config(
     page_title="SmartCrop | Field Intelligence",
@@ -98,6 +100,49 @@ def fmt(value, digits=2):
         return "Not available"
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_nasa_power_monthly(latitude, longitude, year=2025):
+    """Fetch daily NASA POWER data for a point and aggregate it by month."""
+    params = {
+        "parameters": "T2M,PRECTOTCORR,ALLSKY_SFC_SW_DWN",
+        "community": "AG",
+        "longitude": round(float(longitude), 4),
+        "latitude": round(float(latitude), 4),
+        "start": f"{year}0101",
+        "end": f"{year}1231",
+        "format": "JSON",
+    }
+    response = requests.get(NASA_POWER_URL, params=params, timeout=60)
+    response.raise_for_status()
+    payload = response.json()
+    parameter_data = payload.get("properties", {}).get("parameter", {})
+    required = ["T2M", "PRECTOTCORR", "ALLSKY_SFC_SW_DWN"]
+    if not all(key in parameter_data for key in required):
+        raise ValueError("NASA POWER response did not contain all requested parameters.")
+
+    frames = []
+    for key in required:
+        series = pd.Series(parameter_data[key], name=key, dtype="float64")
+        series.index = pd.to_datetime(series.index, format="%Y%m%d")
+        series = series.replace(-999.0, pd.NA)
+        frames.append(series)
+    daily = pd.concat(frames, axis=1).sort_index()
+    daily.index.name = "date"
+    monthly = daily.resample("MS").agg({
+        "T2M": "mean",
+        "PRECTOTCORR": "sum",
+        "ALLSKY_SFC_SW_DWN": "mean",
+    }).reset_index()
+    monthly = monthly.rename(columns={
+        "date": "year_month",
+        "T2M": "avg_temperature",
+        "PRECTOTCORR": "total_rainfall",
+        "ALLSKY_SFC_SW_DWN": "avg_solar_radiation",
+    })
+    monthly["year_month"] = monthly["year_month"].dt.strftime("%Y-%m")
+    return monthly
+
+
 def pretty_crop(value):
     names = {
         "barley": "Barley", "wheat": "Wheat", "maize": "Maize",
@@ -124,6 +169,13 @@ except Exception as exc:
     st.error(f"Could not open the database: {exc}")
     st.stop()
 
+if "selected_lat" not in st.session_state:
+    st.session_state.selected_lat = DEFAULT_LAT
+if "selected_lon" not in st.session_state:
+    st.session_state.selected_lon = DEFAULT_LON
+if "selected_location_label" not in st.session_state:
+    st.session_state.selected_location_label = "Antalya pilot point"
+
 with st.sidebar:
     st.markdown("# 🌱 SmartCrop")
     st.caption("NASA Space Apps Challenge")
@@ -141,9 +193,10 @@ with st.sidebar:
         label_visibility="visible",
     )
     st.divider()
-    st.caption("PILOT LOCATION")
-    st.markdown("**Antalya, Türkiye**")
-    st.caption(f"{LAT:.4f}, {LON:.4f}")
+    st.caption("SELECTED LOCATION")
+    st.markdown(f"**{st.session_state.selected_location_label}**")
+    st.caption(f"{st.session_state.selected_lat:.4f}, {st.session_state.selected_lon:.4f}")
+    st.caption("Choose a point on the map in Overview.")
 
 climate = data("climate_monthly")
 soil = data("soil_site_summary")
@@ -163,23 +216,62 @@ if page == "Overview":
         if score_col else 0
     )
     a, b, c, d = st.columns(4)
-    a.metric("Pilot location", "Antalya")
+    a.metric("Selected location", st.session_state.selected_location_label)
     b.metric("Climate records", f"{len(climate)} months" if not climate.empty else "Unavailable")
     c.metric("Scored crops", str(valid_scores))
     d.metric("Rotation candidates", str(len(rotation)))
 
     left, right = st.columns([1.12, 1])
     with left:
-        section("Pilot field location")
-        map_view = folium.Map(location=[LAT, LON], zoom_start=9, tiles="OpenStreetMap")
+        section("Select an analysis point in Antalya")
+        map_view = folium.Map(
+            location=[st.session_state.selected_lat, st.session_state.selected_lon],
+            zoom_start=9,
+            tiles="OpenStreetMap",
+            control_scale=True,
+        )
         folium.Marker(
-            [LAT, LON],
-            tooltip="SmartCrop pilot location",
-            popup="Antalya, Türkiye",
+            [st.session_state.selected_lat, st.session_state.selected_lon],
+            tooltip="Selected analysis point",
+            popup=st.session_state.selected_location_label,
             icon=folium.Icon(color="green"),
         ).add_to(map_view)
-        st_folium(map_view, height=340, use_container_width=True, returned_objects=[])
-        st.caption("The map shows the current pilot analysis point. Other locations require their own data collection.")
+        map_event = st_folium(
+            map_view,
+            height=390,
+            use_container_width=True,
+            returned_objects=["last_clicked"],
+            key="smartcrop_location_map",
+        )
+        clicked = map_event.get("last_clicked") if map_event else None
+        if clicked:
+            new_lat = float(clicked["lat"])
+            new_lon = float(clicked["lng"])
+            # Antalya's approximate geographic bounding box; this is a coarse guard, not an official boundary.
+            if 35.8 <= new_lat <= 37.8 and 28.0 <= new_lon <= 33.5:
+                if (round(new_lat, 5), round(new_lon, 5)) != (
+                    round(st.session_state.selected_lat, 5),
+                    round(st.session_state.selected_lon, 5),
+                ):
+                    st.session_state.selected_lat = new_lat
+                    st.session_state.selected_lon = new_lon
+                    st.session_state.selected_location_label = "Custom point in Antalya"
+                    st.rerun()
+            else:
+                st.warning("Please select a point within the approximate Antalya region.")
+        st.caption(
+            "Click anywhere within the approximate Antalya region to select a point. "
+            "The map selection updates the NASA POWER climate analysis."
+        )
+        st.write(
+            f"**Selected coordinates:** {st.session_state.selected_lat:.5f}, "
+            f"{st.session_state.selected_lon:.5f}"
+        )
+        if st.button("Reset to Antalya pilot point"):
+            st.session_state.selected_lat = DEFAULT_LAT
+            st.session_state.selected_lon = DEFAULT_LON
+            st.session_state.selected_location_label = "Antalya pilot point"
+            st.rerun()
     with right:
         section("Preliminary crop screening")
         name = col(suit, ["crop_name_en", "crop_name", "name_en", "crop_id"])
@@ -203,14 +295,29 @@ elif page == "Climate Analysis":
         "Climate analysis",
         "Monthly climate indicators derived from NASA POWER daily observations.",
     )
-    if climate.empty:
-        st.warning("The climate_monthly table is empty or missing.")
+    st.write(
+        f"**Selected coordinates:** {st.session_state.selected_lat:.5f}, "
+        f"{st.session_state.selected_lon:.5f}"
+    )
+    try:
+        with st.spinner("Fetching 2025 climate data from NASA POWER for the selected point..."):
+            active_climate = fetch_nasa_power_monthly(
+                st.session_state.selected_lat, st.session_state.selected_lon, 2025
+            )
+        st.success("Location-specific NASA POWER climate data loaded.")
+    except Exception as exc:
+        active_climate = climate.copy()
+        st.error(f"Could not retrieve live NASA POWER data for this point: {exc}")
+        st.warning("Showing the original Antalya pilot climate dataset as a fallback. It is not data for the newly selected point.")
+
+    if active_climate.empty:
+        st.warning("No climate data are available for this point or in the fallback dataset.")
     else:
-        month = col(climate, ["year_month", "month", "date"])
+        month = col(active_climate, ["year_month", "month", "date"])
         temp = col(climate, ["avg_temperature", "average_temperature", "mean_temperature"])
         rain = col(climate, ["total_rainfall", "total_rainfall_mm", "rainfall_mm"])
         solar = col(climate, ["avg_solar_radiation", "average_solar_radiation", "solar_radiation"])
-        df = climate.copy()
+        df = active_climate.copy()
         x = month if month else df.index
         if month:
             df[month] = df[month].astype(str)
@@ -237,14 +344,15 @@ elif page == "Climate Analysis":
                 fig.update_layout(template="plotly_white", height=320, margin=dict(l=15, r=15, t=20, b=15))
                 st.plotly_chart(fig, use_container_width=True)
         with st.expander("View monthly source data"):
-            st.dataframe(climate, use_container_width=True, hide_index=True)
-    st.caption("Source: NASA POWER. Current pilot time series: 2025.")
+            st.dataframe(active_climate, use_container_width=True, hide_index=True)
+    st.caption("Source: NASA POWER daily point API, aggregated to monthly values for 2025. This is one year of data, not a climate normal or forecast.")
 
 elif page == "Soil Analysis":
     hero(
         "Soil analysis",
         "Explore soil texture by depth and estimated available-water storage across the soil profile.",
     )
+    st.warning("Soil data in this version still belong to the original Antalya pilot dataset; they do not automatically change when the map point changes.")
     if not soil.empty:
         section("Site summary")
         display_soil = soil.copy()
@@ -315,6 +423,7 @@ elif page == "Crop Suitability":
         "Crop suitability screening",
         "An explainable preliminary screening based on annual rainfall fit and soil pH fit.",
     )
+    st.warning("Crop suitability scores still use the original Antalya pilot soil/climate screening dataset. They are not recalculated for a newly selected map point in this version.")
     if suit.empty:
         st.warning("The crop_suitability_assessment table is missing. Run the screening engine first.")
     else:
@@ -372,6 +481,7 @@ elif page == "Crop Rotation":
         "Crop rotation scenarios",
         "Explore three-year candidate sequences generated using transparent diversity rules.",
     )
+    st.warning("Rotation candidates still use the original Antalya pilot screening scores. They are not recalculated for a newly selected map point in this version.")
     if rotation.empty:
         st.warning("The crop_rotation_candidates table is missing. Run the rotation engine first.")
     else:
@@ -431,7 +541,7 @@ elif page == "Data Sources":
         "Review the datasets behind SmartCrop and understand the limits of each analysis.",
     )
     sources = [
-        ("NASA POWER", "Climate data", "Daily meteorological and solar-energy parameters.", "https://power.larc.nasa.gov/"),
+        ("NASA POWER", "Climate data", "Daily meteorological and solar-energy parameters; this release fetches 2025 data for the selected map coordinate.", "https://power.larc.nasa.gov/"),
         ("ISRIC SoilGrids", "Soil data", "Gridded global predictions of selected soil properties.", "https://www.isric.org/explore/soilgrids"),
         ("FAO", "Agricultural references", "General references for crop water requirements and rooting depths.", "https://www.fao.org/"),
         ("FAO ECOCROP", "Crop requirements", "Crop ecological requirement reference database.", "https://ecocrop.apps.fao.org/"),
@@ -444,7 +554,8 @@ elif page == "Data Sources":
 
     section("Methodology and important limitations")
     limitations = [
-        "The current climate series covers 2025 only; it is not a long-term climate normal or a weather forecast.",
+        "Climate data are fetched from NASA POWER for the selected map point for 2025 only; they are not a long-term climate normal or a weather forecast.",
+        "Soil, crop suitability, and rotation datasets remain tied to the original Antalya pilot point in this release; only climate analysis responds to map selection.",
         "SoilGrids values are gridded estimates and have not been validated with field soil samples.",
         "The selected pH value is a nearest-valid-pixel estimate; its pixel distance is not recorded in the current site summary.",
         "Rainfall fit compares one observed calendar year's rainfall with ECOCROP reference ranges. It is not irrigation demand.",
