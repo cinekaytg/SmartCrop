@@ -427,16 +427,34 @@ if page == "Overview":
         "Smarter decisions for healthier fields.",
         "Explore satellite-derived climate and soil information, compare crop requirements, and review transparent rotation scenarios.",
     )
-    score_col = col(suit, ["preliminary_screening_score", "preliminary_score"])
+    overview_location_current = (
+        not st.session_state.selected_climate.empty
+        and st.session_state.climate_location == (
+            st.session_state.selected_lat, st.session_state.selected_lon
+        )
+    )
+    if overview_location_current and not st.session_state.location_suitability.empty:
+        overview_scores = st.session_state.location_suitability.copy()
+        overview_name_col = "Crop"
+        overview_score_col = "Preliminary score"
+        overview_rotation_count = len(st.session_state.location_rotations)
+        overview_climate_count = len(st.session_state.selected_climate)
+    else:
+        overview_scores = suit.copy()
+        overview_name_col = col(overview_scores, ["crop_name_en", "crop_name", "name_en", "crop_id"])
+        overview_score_col = col(overview_scores, ["preliminary_screening_score", "preliminary_score"])
+        overview_rotation_count = len(rotation)
+        overview_climate_count = len(climate)
+
     valid_scores = (
-        pd.to_numeric(suit[score_col], errors="coerce").notna().sum()
-        if score_col else 0
+        pd.to_numeric(overview_scores[overview_score_col], errors="coerce").notna().sum()
+        if overview_score_col and not overview_scores.empty else 0
     )
     a, b, c, d = st.columns(4)
     a.metric("Selected point", "Global")
-    b.metric("Climate records", f"{len(climate)} months" if not climate.empty else "Unavailable")
+    b.metric("Climate records", f"{overview_climate_count} months" if overview_climate_count else "Unavailable")
     c.metric("Scored crops", str(valid_scores))
-    d.metric("Rotation candidates", str(len(rotation)))
+    d.metric("Rotation candidates", str(overview_rotation_count))
 
     left, right = st.columns([1.12, 1])
     with left:
@@ -515,12 +533,21 @@ if page == "Overview":
         st.caption("Global point selection is enabled. Soil and crop results below still use the Antalya pilot dataset.")
     with right:
         section("Preliminary crop screening")
-        name = col(suit, ["crop_name_en", "crop_name", "name_en", "crop_id"])
-        if score_col and name and not suit.empty:
-            view = suit[[name, score_col]].copy()
-            view[score_col] = pd.to_numeric(view[score_col], errors="coerce")
-            view = view.dropna().sort_values(score_col, ascending=False)
-            view[name] = view[name].map(pretty_crop)
+        if overview_location_current and overview_score_col and overview_name_col:
+            st.caption(
+                f"Live climate/soil screening · "
+                f"{st.session_state.selected_lat:.4f}, {st.session_state.selected_lon:.4f}"
+            )
+        else:
+            st.caption(
+                "Original Antalya pilot assessment · load climate data for the selected point "
+                "to refresh this table"
+            )
+        if overview_score_col and overview_name_col and not overview_scores.empty:
+            view = overview_scores[[overview_name_col, overview_score_col]].copy()
+            view[overview_score_col] = pd.to_numeric(view[overview_score_col], errors="coerce")
+            view = view.dropna().sort_values(overview_score_col, ascending=False)
+            view[overview_name_col] = view[overview_name_col].map(pretty_crop)
             view.columns = ["Crop", "Preliminary score"]
             view["Preliminary score"] = view["Preliminary score"].map(lambda x: fmt(x))
             st.dataframe(view, hide_index=True, use_container_width=True)
@@ -738,18 +765,37 @@ elif page == "Crop Suitability":
         for c in ["Temperature fit", "Annual rainfall fit", "Soil pH fit", "Preliminary score"]:
             display[c] = display[c].map(lambda x: "Not available" if pd.isna(x) else fmt(x))
         st.dataframe(display, hide_index=True, use_container_width=True)
-        st.warning(
-            "These are climate-based preliminary screening scores, not yield predictions. "
-            "Soil pH is not included because location-specific SoilGrids retrieval is not yet connected; "
-            "Antalya soil values are deliberately not reused for other locations."
+        soil_is_current_for_crop = (
+            st.session_state.selected_soil is not None
+            and st.session_state.soil_location == (
+                st.session_state.selected_lat, st.session_state.selected_lon
+            )
+        )
+        if soil_is_current_for_crop:
+            st.info(
+                "Soil pH from SoilGrids is included for this coordinate. "
+                "Soil texture is displayed in Soil Analysis but is not yet part of the score."
+            )
+        else:
+            st.warning(
+                "These are climate-only preliminary screening scores. "
+                "Load SoilGrids data for this same coordinate in Soil Analysis to include soil pH."
+            )
+        st.caption(
+            "Scores are screening indicators, not yield predictions or agronomic prescriptions. "
+            "The current model uses annual climate indicators and available ECOCROP ranges."
         )
     else:
         st.info(
-            "Select a point on the Overview map and load its NASA POWER climate data to calculate "
-            "location-specific crop screening. Until then, the database contains the original Antalya pilot assessment."
+            "No current location-specific screening is available yet. "
+            "Go to Overview, select your point, and load NASA POWER climate data. "
+            "The original Antalya pilot scores are intentionally hidden here to avoid "
+            "presenting them as results for another location."
         )
-        if not suit.empty:
-            st.dataframe(suit, hide_index=True, use_container_width=True)
+        st.caption(
+            f"Current selected point: {st.session_state.selected_lat:.4f}, "
+            f"{st.session_state.selected_lon:.4f}"
+        )
 
 elif page == "Crop Rotation":
     hero(
