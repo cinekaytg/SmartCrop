@@ -1,6 +1,1 @@
-streamlit
-pandas
-plotly
-folium
-streamlit-folium
-requests
+streamlit\npandas\nplotly\nfolium\nstreamlit-folium\nrequests\n
