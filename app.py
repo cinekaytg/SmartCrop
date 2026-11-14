@@ -5,6 +5,7 @@ from datetime import date
 import requests
 
 import folium
+import itertools
 import pandas as pd
 import plotly.express as px
 import streamlit as st
