@@ -168,6 +168,93 @@ def pretty_crop(value):
     return names.get(text.lower(), text.replace("_", " ").title())
 
 
+def range_fit(value, opt_min, opt_max, abs_min, abs_max):
+    """Transparent 0-100 suitability fit from ECOCROP optimum and absolute ranges."""
+    vals = [value, opt_min, opt_max, abs_min, abs_max]
+    if any(v is None or pd.isna(v) for v in vals):
+        return None
+    value, opt_min, opt_max, abs_min, abs_max = map(float, vals)
+    if opt_min <= value <= opt_max:
+        return 100.0
+    if value < opt_min:
+        if value < abs_min or opt_min == abs_min:
+            return 0.0
+        return max(0.0, 100.0 * (value - abs_min) / (opt_min - abs_min))
+    if value > opt_max:
+        if value > abs_max or abs_max == opt_max:
+            return 0.0
+        return max(0.0, 100.0 * (abs_max - value) / (abs_max - opt_max))
+    return 0.0
+
+
+def build_location_suitability(climate_df, ecological, catalog, soil_ph=None):
+    """Build a location-specific preliminary screening from available data only."""
+    if climate_df.empty or ecological.empty:
+        return pd.DataFrame()
+    temp_col = col(climate_df, ["avg_temperature"])
+    rain_col = col(climate_df, ["total_rainfall"])
+    if not temp_col or not rain_col:
+        return pd.DataFrame()
+    annual_temp = pd.to_numeric(climate_df[temp_col], errors="coerce").mean()
+    annual_rain = pd.to_numeric(climate_df[rain_col], errors="coerce").sum()
+    rows = []
+    for _, crop in ecological.iterrows():
+        temp_score = range_fit(
+            annual_temp, crop.get("temp_opt_min_c"), crop.get("temp_opt_max_c"),
+            crop.get("temp_abs_min_c"), crop.get("temp_abs_max_c")
+        )
+        rain_score = range_fit(
+            annual_rain, crop.get("annual_rain_opt_min_mm"),
+            crop.get("annual_rain_opt_max_mm"),
+            crop.get("annual_rain_abs_min_mm"), crop.get("annual_rain_abs_max_mm")
+        )
+        ph_score = None
+        if soil_ph is not None and not pd.isna(soil_ph):
+            ph_score = range_fit(
+                float(soil_ph), crop.get("ph_opt_min"), crop.get("ph_opt_max"),
+                crop.get("ph_abs_min"), crop.get("ph_abs_max")
+            )
+        components = [v for v in [temp_score, rain_score, ph_score] if v is not None]
+        score = sum(components) / len(components) if components else None
+        cat = catalog[catalog["crop_id"] == crop["crop_id"]]
+        crop_name = cat.iloc[0]["crop_name_en"] if not cat.empty else str(crop["crop_id"]).title()
+        crop_group = cat.iloc[0]["crop_group"] if not cat.empty else "Unknown"
+        rows.append({
+            "crop_id": crop["crop_id"],
+            "Crop": crop_name,
+            "Crop group": crop_group,
+            "Temperature fit": temp_score,
+            "Annual rainfall fit": rain_score,
+            "Soil pH fit": ph_score,
+            "Preliminary score": score,
+            "Data components": len(components),
+        })
+    result = pd.DataFrame(rows)
+    return result.sort_values("Preliminary score", ascending=False, na_position="last")
+
+
+def build_location_rotations(suitability):
+    """Generate 3-year non-repeating sequences with no adjacent same crop group."""
+    if suitability.empty:
+        return pd.DataFrame()
+    valid = suitability.dropna(subset=["Preliminary score"]).to_dict("records")
+    candidates = []
+    for a, b, c in itertools.permutations(valid, 3):
+        if a["crop_id"] == b["crop_id"] or b["crop_id"] == c["crop_id"] or a["crop_id"] == c["crop_id"]:
+            continue
+        if a["Crop group"] == b["Crop group"] or b["Crop group"] == c["Crop group"]:
+            continue
+        scores = [a["Preliminary score"], b["Preliminary score"], c["Preliminary score"]]
+        candidates.append({
+            "Year 1": a["Crop"], "Year 2": b["Crop"], "Year 3": c["Crop"],
+            "Crop group sequence": f'{a["Crop group"]} → {b["Crop group"]} → {c["Crop group"]}',
+            "Mean screening score": sum(scores) / 3,
+        })
+    return pd.DataFrame(candidates).sort_values(
+        "Mean screening score", ascending=False
+    ).head(15) if candidates else pd.DataFrame()
+
+
 if not DB_PATH.exists():
     st.error("Database file not found. Place app.py and smartcrop.db in the same folder.")
     st.code(str(DB_PATH))
@@ -189,6 +276,12 @@ if "selected_climate" not in st.session_state:
     st.session_state.selected_climate = pd.DataFrame()
 if "climate_location" not in st.session_state:
     st.session_state.climate_location = None
+if "location_suitability" not in st.session_state:
+    st.session_state.location_suitability = pd.DataFrame()
+if "location_rotations" not in st.session_state:
+    st.session_state.location_rotations = pd.DataFrame()
+if "location_soil_ph" not in st.session_state:
+    st.session_state.location_soil_ph = None
 
 with st.sidebar:
     st.markdown("# 🌱 SmartCrop")
@@ -217,6 +310,8 @@ profile = data("soil_profile")
 suit = data("crop_suitability_assessment")
 rotation = data("crop_rotation_candidates")
 root = data("crop_root_zone_water")
+ecological = data("crop_ecological_requirements")
+catalog = data("crop_catalog")
 
 if page == "Overview":
     hero(
@@ -268,6 +363,9 @@ if page == "Overview":
                 st.session_state.selected_lon = new_lon
                 st.session_state.selected_climate = pd.DataFrame()
                 st.session_state.climate_location = None
+                st.session_state.location_suitability = pd.DataFrame()
+                st.session_state.location_rotations = pd.DataFrame()
+                st.session_state.location_soil_ph = None
                 st.rerun()
 
         st.write(
@@ -284,7 +382,15 @@ if page == "Overview":
                 st.session_state.climate_location = (
                     st.session_state.selected_lat, st.session_state.selected_lon
                 )
-                st.success("NASA POWER climate data loaded for the selected point.")
+                # SoilGrids point-query API is currently paused. Do not reuse Antalya pH
+                # for another point. Climate-only screening is explicitly labelled.
+                st.session_state.location_suitability = build_location_suitability(
+                    result, ecological, catalog, soil_ph=None
+                )
+                st.session_state.location_rotations = build_location_rotations(
+                    st.session_state.location_suitability
+                )
+                st.success("NASA POWER climate data loaded. Crop screening and rotation scenarios were recalculated using this location's climate and available ECOCROP requirements.")
             except Exception as exc:
                 st.error(f"NASA POWER data could not be loaded: {exc}")
         st.caption("Global point selection is enabled. Soil and crop results below still use the Antalya pilot dataset.")
@@ -371,187 +477,138 @@ elif page == "Climate Analysis":
 elif page == "Soil Analysis":
     hero(
         "Soil analysis",
-        "Explore soil texture by depth and estimated available-water storage across the soil profile.",
+        "Location-specific soil properties are shown only when data are available for the selected point.",
     )
-    if not soil.empty:
-        section("Site summary")
-        display_soil = soil.copy()
-        display_soil.columns = [str(c).replace("_", " ").title() for c in display_soil.columns]
-        st.dataframe(display_soil, use_container_width=True, hide_index=True)
+    is_antalla_pilot = (
+        abs(st.session_state.selected_lat - DEFAULT_LAT) < 0.02
+        and abs(st.session_state.selected_lon - DEFAULT_LON) < 0.02
+    )
+    if is_antalla_pilot:
+        st.info("The selected point is within the Antalya pilot area. The following profile is the existing SoilGrids estimate for the pilot coordinates.")
+        if not soil.empty:
+            section("Antalya pilot site summary")
+            display_soil = soil.copy()
+            display_soil.columns = [str(c).replace("_", " ").title() for c in display_soil.columns]
+            st.dataframe(display_soil, use_container_width=True, hide_index=True)
+        if not profile.empty:
+            section("Soil profile by depth")
+            depth = col(profile, ["depth_label", "depth"])
+            texture_cols = [col(profile, x) for x in ["sand_pct", "silt_pct", "clay_pct"]]
+            texture_cols = [x for x in texture_cols if x]
+            if depth and texture_cols:
+                long = profile[[depth] + texture_cols].melt(
+                    id_vars=depth, var_name="Particle", value_name="Percentage"
+                )
+                long["Particle"] = long["Particle"].map({
+                    "sand_pct": "Sand", "silt_pct": "Silt", "clay_pct": "Clay"
+                }).fillna(long["Particle"])
+                fig = px.bar(long, x="Percentage", y=depth, color="Particle",
+                             orientation="h", barmode="stack",
+                             title="Soil texture by depth (%)")
+                fig.update_layout(template="plotly_white", height=350)
+                st.plotly_chart(fig, use_container_width=True)
+            st.dataframe(profile, hide_index=True, use_container_width=True)
     else:
-        st.info("The soil_site_summary table is not available.")
-
-    if not profile.empty:
-        section("Soil profile by depth")
-        depth = col(profile, ["depth_label", "depth"])
-        texture_cols = [col(profile, [x]) for x in ["sand_pct", "silt_pct", "clay_pct"]]
-        texture_cols = [x for x in texture_cols if x]
-        if depth and texture_cols:
-            long = profile[[depth] + texture_cols].melt(
-                id_vars=depth, var_name="Particle", value_name="Percentage"
-            )
-            long["Particle"] = long["Particle"].map({
-                "sand_pct": "Sand", "silt_pct": "Silt", "clay_pct": "Clay"
-            }).fillna(long["Particle"])
-            fig = px.bar(
-                long, x="Percentage", y=depth, color="Particle", orientation="h",
-                barmode="stack", title="Soil texture by depth (%)",
-                color_discrete_sequence=["#d8b56d", "#9ab9a4", "#647e69"],
-            )
-            fig.update_layout(template="plotly_white", height=360, margin=dict(l=15, r=15, t=45, b=15))
-            st.plotly_chart(fig, use_container_width=True)
-
-        aw = col(profile, ["available_water_mm"])
-        if aw:
-            section("Estimated available water by soil layer")
-            tmp = profile.copy()
-            tmp[aw] = pd.to_numeric(tmp[aw], errors="coerce")
-            fig = px.bar(
-                tmp, x=depth if depth else tmp.index, y=aw,
-                labels={aw: "Available-water storage (mm)", depth: "Soil depth"} if depth else {aw: "Available-water storage (mm)"},
-                color_discrete_sequence=["#3f8c70"],
-            )
-            fig.update_layout(template="plotly_white", height=300, margin=dict(l=15, r=15, t=20, b=15))
-            st.plotly_chart(fig, use_container_width=True)
-
-        with st.expander("View complete soil profile records"):
-            st.dataframe(profile, use_container_width=True, hide_index=True)
-
-    if not root.empty:
-        water = col(root, ["root_zone_storage_mm"])
-        crop = col(root, ["crop_id"])
-        if water and crop:
-            section("Estimated root-zone water storage by crop")
-            tmp = root[[crop, water]].copy()
-            tmp[crop] = tmp[crop].map(pretty_crop)
-            tmp[water] = pd.to_numeric(tmp[water], errors="coerce")
-            fig = px.bar(
-                tmp, x=crop, y=water,
-                labels={crop: "Crop", water: "Estimated storage (mm)"},
-                color_discrete_sequence=["#28734f"],
-            )
-            fig.update_layout(template="plotly_white", height=300, margin=dict(l=15, r=15, t=20, b=15))
-            st.plotly_chart(fig, use_container_width=True)
-
+        st.warning(
+            "No verified location-specific soil profile is currently available for this selected point. "
+            "SoilGrids REST point-query service is paused, and the WCS/COG integration has not yet been implemented. "
+            "The Antalya soil profile is intentionally not displayed as if it belonged to this location."
+        )
+        st.markdown(
+            "[SoilGrids data access documentation](https://docs.isric.org/globaldata/soilgrids/wcs.html)"
+        )
     st.caption(
-        "SoilGrids values are gridded estimates, not field measurements. "
-        "Root-zone storage is not the same as irrigation demand or water available to the plant at a specific date."
+        "SoilGrids provides gridded model estimates, not field measurements. "
+        "A selected coordinate does not guarantee a field-level soil assessment."
     )
 
 elif page == "Crop Suitability":
     hero(
         "Crop suitability screening",
-        "An explainable preliminary screening based on annual rainfall fit and soil pH fit.",
+        "Location-specific preliminary screening using NASA POWER climate data and FAO ECOCROP crop requirements.",
     )
-    if suit.empty:
-        st.warning("The crop_suitability_assessment table is missing. Run the screening engine first.")
-    else:
-        name = col(suit, ["crop_name_en", "crop_name", "name_en", "crop_id"])
-        rain = col(suit, ["rainfall_fit_score", "rainfall_score"])
-        ph = col(suit, ["ph_fit_score", "ph_score"])
-        total = col(suit, ["preliminary_screening_score", "preliminary_score"])
-        water = col(suit, ["root_zone_available_water_mm", "root_zone_water_mm"])
-        selected = [x for x in [name, rain, ph, total, water] if x]
-        view = suit[selected].copy()
-        rename = {}
-        for old, new in [
-            (name, "Crop"), (rain, "Rainfall fit score"), (ph, "Soil pH fit score"),
-            (total, "Preliminary screening score"),
-            (water, "Root-zone water storage (mm)"),
-        ]:
-            if old:
-                rename[old] = new
-        view = view.rename(columns=rename)
-        if "Crop" in view:
-            view["Crop"] = view["Crop"].map(pretty_crop)
-        for c in view.columns:
-            if c != "Crop":
-                view[c] = pd.to_numeric(view[c], errors="coerce")
-
-        if "Preliminary screening score" in view:
-            view = view.sort_values("Preliminary screening score", ascending=False, na_position="last")
-            valid = view.dropna(subset=["Preliminary screening score"])
-            if not valid.empty:
-                section("Preliminary screening ranking")
-                fig = px.bar(
-                    valid, x="Crop", y="Preliminary screening score",
-                    text_auto=".2f", color="Preliminary screening score",
-                    color_continuous_scale=["#d7e8dc", "#1f704d"], range_color=(0, 100),
-                )
-                fig.update_layout(template="plotly_white", height=360, coloraxis_showscale=False,
-                                  margin=dict(l=15, r=15, t=20, b=15))
-                st.plotly_chart(fig, use_container_width=True)
-
-        section("Crop comparison")
-        display = view.copy()
-        for c in display.columns:
-            if c != "Crop":
-                display[c] = display[c].map(lambda x: "Not available" if pd.isna(x) else fmt(x))
-        st.dataframe(display, use_container_width=True, hide_index=True)
-
-        st.info(
-            "Screening score = (rainfall fit score + soil pH fit score) / 2. "
-            "Both components must be available. Missing values are not treated as zero. "
-            "This is a preliminary indicator, not a yield forecast or final planting recommendation."
+    location_current = (
+        not st.session_state.selected_climate.empty
+        and st.session_state.climate_location == (
+            st.session_state.selected_lat, st.session_state.selected_lon
         )
+    )
+    if location_current and not st.session_state.location_suitability.empty:
+        view = st.session_state.location_suitability.copy()
+        st.success(
+            f"Climate-based screening for {st.session_state.selected_lat:.4f}, "
+            f"{st.session_state.selected_lon:.4f}"
+        )
+        section("Crop ranking for selected location")
+        chart_data = view.dropna(subset=["Preliminary score"])
+        if not chart_data.empty:
+            fig = px.bar(
+                chart_data, x="Crop", y="Preliminary score",
+                text_auto=".1f", color="Preliminary score",
+                color_continuous_scale=["#d7e8dc", "#1f704d"], range_color=(0, 100)
+            )
+            fig.update_layout(template="plotly_white", height=360,
+                              coloraxis_showscale=False,
+                              margin=dict(l=15, r=15, t=20, b=15))
+            st.plotly_chart(fig, use_container_width=True)
+        display = view.drop(columns=["crop_id"]).copy()
+        for c in ["Temperature fit", "Annual rainfall fit", "Soil pH fit", "Preliminary score"]:
+            display[c] = display[c].map(lambda x: "Not available" if pd.isna(x) else fmt(x))
+        st.dataframe(display, hide_index=True, use_container_width=True)
+        st.warning(
+            "These are climate-based preliminary screening scores, not yield predictions. "
+            "Soil pH is not included because location-specific SoilGrids retrieval is not yet connected; "
+            "Antalya soil values are deliberately not reused for other locations."
+        )
+    else:
+        st.info(
+            "Select a point on the Overview map and load its NASA POWER climate data to calculate "
+            "location-specific crop screening. Until then, the database contains the original Antalya pilot assessment."
+        )
+        if not suit.empty:
+            st.dataframe(suit, hide_index=True, use_container_width=True)
 
 elif page == "Crop Rotation":
     hero(
         "Crop rotation scenarios",
-        "Explore three-year candidate sequences generated using transparent diversity rules.",
+        "Three-year candidate sequences recalculated from the selected location's climate-based crop screening.",
     )
-    if rotation.empty:
-        st.warning("The crop_rotation_candidates table is missing. Run the rotation engine first.")
-    else:
-        score_name = col(rotation, ["mean_screening_score", "mean_score", "average_score"])
-        section("Top rotation candidates")
-        rows = rotation.copy()
-        if score_name:
-            rows[score_name] = pd.to_numeric(rows[score_name], errors="coerce")
-            rows = rows.sort_values(score_name, ascending=False, na_position="last")
-
-        crop_fields = []
-        for year in [1, 2, 3]:
-            crop_fields.append(col(rows, [f"year_{year}_crop_name", f"year{year}_crop_name", f"year_{year}_crop"]))
-        group_fields = [
-            col(rows, [f"year_{year}_crop_group", f"year{year}_crop_group"])
-            for year in [1, 2, 3]
-        ]
-
-        for index, (_, row) in enumerate(rows.head(15).iterrows()):
-            crops = [pretty_crop(row.get(field)) if field else "Not available" for field in crop_fields]
-            groups = [pretty_crop(row.get(field)) if field else "Not available" for field in group_fields]
-            score_value = row.get(score_name) if score_name else None
-            sequence = " → ".join(crops)
-            group_line = " → ".join(groups)
-            card_class = "rotation-card top" if index == 0 else "rotation-card"
+    location_current = (
+        not st.session_state.selected_climate.empty
+        and st.session_state.climate_location == (
+            st.session_state.selected_lat, st.session_state.selected_lon
+        )
+    )
+    if location_current and not st.session_state.location_rotations.empty:
+        st.success(
+            f"Rotation candidates for {st.session_state.selected_lat:.4f}, "
+            f"{st.session_state.selected_lon:.4f}"
+        )
+        rows = st.session_state.location_rotations
+        for index, (_, row) in enumerate(rows.iterrows(), start=1):
             left, right = st.columns([4, 1])
             with left:
                 st.markdown(
-                    f'<div class="{card_class}"><div class="rotation-sequence">'
-                    f'#{index + 1} &nbsp; {sequence}</div>'
-                    f'<div class="rotation-groups">Crop groups: {group_line}</div></div>',
+                    f'<div class="rotation-card {"top" if index == 1 else ""}">'
+                    f'<div class="rotation-sequence">#{index} &nbsp; '
+                    f'{row["Year 1"]} → {row["Year 2"]} → {row["Year 3"]}</div>'
+                    f'<div class="rotation-groups">{row["Crop group sequence"]}</div></div>',
                     unsafe_allow_html=True,
                 )
             with right:
-                st.metric("Mean screening score", fmt(score_value) if score_value is not None else "Not available")
-
+                st.metric("Mean score", fmt(row["Mean screening score"]))
+        st.warning(
+            "Rotation scenarios are heuristic candidates based on climate-only preliminary scores. "
+            "They do not account for field history, planting calendars, pests, nutrient balances, "
+            "irrigation constraints, or farm economics. They are not agronomic prescriptions."
+        )
+    else:
         st.info(
-            "Rules: (1) no crop repeats within the three-year sequence; "
-            "(2) the same crop group cannot occur in adjacent years. "
-            "Ranking is the mean of the three preliminary crop screening scores. "
-            "This is a heuristic candidate generator, not agronomic validation."
+            "Select a point on the Overview map and load its NASA POWER climate data to generate "
+            "location-specific rotation candidates. The database rotation table is the original Antalya pilot."
         )
-
-    with st.expander("Excluded crops and model limitations"):
-        st.markdown(
-            "- Cotton and chickpea are excluded when complete rainfall and pH screening scores are unavailable.\n"
-            "- Olive is perennial and is not included in annual rotation sequences.\n"
-            "- Field crop history, local planting calendars, pest and disease cycles, nutrient balances, "
-            "irrigation constraints, and farm economics are not modelled.\n"
-            "- Different adjacent crop groups do not guarantee a beneficial rotation.\n"
-            "- Mean screening score is not a prediction of rotation yield or performance."
-        )
+        if not rotation.empty:
+            st.dataframe(rotation, hide_index=True, use_container_width=True)
 
 elif page == "Data Sources":
     hero(
@@ -574,9 +631,9 @@ elif page == "Data Sources":
     limitations = [
         "Selected-point climate data are fetched from NASA POWER for 2025; they are not a long-term climate normal or a weather forecast.",
         "NASA POWER grid resolution varies by parameter; nearby selected points may return the same grid-cell data.",
-        "The current interactive global selection updates climate data only. Soil, crop suitability, and rotation tables remain based on the Antalya pilot dataset until location-specific soil data are connected.",
+        "Global point selection fetches NASA POWER climate data. Crop screening and rotation are recalculated from climate data and ECOCROP requirements; soil pH is excluded unless location-specific soil data are available.",
         "SoilGrids values are gridded estimates and have not been validated with field soil samples.",
-        "The selected pH value is a nearest-valid-pixel estimate; its pixel distance is not recorded in the current site summary.",
+        "The Antalya pilot pH value is a nearest-valid-pixel estimate. It is not reused for other selected locations.",
         "Rainfall fit compares one observed calendar year's rainfall with ECOCROP reference ranges. It is not irrigation demand.",
         "The preliminary screening score is the equal-weighted mean of rainfall fit and soil pH fit.",
         "Root-zone water storage is estimated using generalized rooting-depth references and SoilGrids layer values.",
