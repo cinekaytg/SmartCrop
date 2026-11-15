@@ -197,14 +197,16 @@ def fetch_nasa_power_climate_normals(latitude, longitude, start_year=1991, end_y
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_soilgrids_point(latitude, longitude):
-    """
-    Fetch SoilGrids 0-5 cm mean predictions for one point via ISRIC WCS.
-    Returned native integer values are converted to pH and percentage units.
+    """Fetch SoilGrids 0–5 cm mean predictions using ISRIC WCS.
+
+    Each property is handled independently: a missing pH pixel must not discard
+    valid texture estimates. If the requested pixel is masked, the nearest
+    valid pixel in the small requested window is used and its distance is
+    reported. SoilGrids native values are divided by 10 (ISRIC metadata).
     """
     try:
         import numpy as np
         import rasterio
-        from rasterio.io import MemoryFile
         from pyproj import Transformer
     except ImportError as exc:
         raise RuntimeError(
@@ -216,81 +218,90 @@ def fetch_soilgrids_point(latitude, longitude):
     if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
         raise ValueError("Coordinates are outside valid latitude/longitude bounds.")
 
-    # ISRIC's SoilGrids native projection: Interrupted Goode Homolosine.
-    soilgrids_proj = (
-        "+proj=igh +datum=WGS84 +no_defs +towgs84=0,0,0"
-    )
-    transformer = Transformer.from_crs(
-        "EPSG:4326", soilgrids_proj, always_xy=True
-    )
+    soilgrids_proj = "+proj=igh +datum=WGS84 +no_defs +towgs84=0,0,0"
+    transformer = Transformer.from_crs("EPSG:4326", soilgrids_proj, always_xy=True)
     x, y = transformer.transform(longitude, latitude)
     if not (math.isfinite(x) and math.isfinite(y)):
         raise ValueError("Could not project this coordinate into the SoilGrids grid.")
 
-    # Request a small window around the point at the native 250 m grid scale.
-    half_window = 375.0
+    # A 1.25 km-wide request provides neighbouring 250 m cells when the
+    # centre pixel is masked (e.g. mixed land/urban/coastal cells).
+    half_window = 625.0
     subsets = [
         ("SUBSET", f"X({x - half_window},{x + half_window})"),
         ("SUBSET", f"Y({y - half_window},{y + half_window})"),
     ]
     crs_uri = "http://www.opengis.net/def/crs/EPSG/0/152160"
-    properties = {
-        "phh2o": "Soil pH",
-        "sand": "Sand",
-        "silt": "Silt",
-        "clay": "Clay",
-    }
+    properties = {"phh2o": "Soil pH", "sand": "Sand", "silt": "Silt", "clay": "Clay"}
     results = {}
+    distances = {}
+    failures = {}
 
     for prop, label in properties.items():
         endpoint = f"https://maps.isric.org/mapserv?map=/map/{prop}.map"
         params = [
-            ("SERVICE", "WCS"),
-            ("VERSION", "2.0.1"),
+            ("SERVICE", "WCS"), ("VERSION", "2.0.1"),
             ("REQUEST", "GetCoverage"),
             ("COVERAGEID", f"{prop}_0-5cm_mean"),
-            ("FORMAT", "GEOTIFF_INT16"),
-            *subsets,
-            ("SUBSETTINGCRS", crs_uri),
-            ("OUTPUTCRS", crs_uri),
-            ("RESX", "250"),
-            ("RESY", "250"),
+            ("FORMAT", "GEOTIFF_INT16"), *subsets,
+            ("SUBSETTINGCRS", crs_uri), ("OUTPUTCRS", crs_uri),
+            ("RESX", "250"), ("RESY", "250"),
         ]
-        response = requests.get(endpoint, params=params, timeout=75)
-        response.raise_for_status()
-        content = response.content
-        if not content[:4] in (b"II*\x00", b"MM\x00*"):
-            detail = content[:500].decode("utf-8", errors="replace")
-            raise RuntimeError(
-                f"SoilGrids did not return a GeoTIFF for {label}. "
-                f"Service response: {detail[:300]}"
-            )
+        try:
+            response = requests.get(endpoint, params=params, timeout=75)
+            response.raise_for_status()
+            content = response.content
+            if content[:4] not in (b"II*\x00", b"MM\x00*"):
+                detail = content[:300].decode("utf-8", errors="replace")
+                raise RuntimeError(f"WCS did not return GeoTIFF data: {detail}")
 
-        with MemoryFile(content) as memfile:
-            with memfile.open() as dataset:
-                sample = next(dataset.sample([(x, y)], masked=True))
-                raw_value = sample[0]
-                if np.ma.is_masked(raw_value):
-                    raise ValueError(
-                        f"No SoilGrids estimate is available at this coordinate for {label}."
-                    )
-                raw_value = float(raw_value)
-                if dataset.nodata is not None and raw_value == float(dataset.nodata):
-                    raise ValueError(
-                        f"SoilGrids returned no-data for {label} at this coordinate."
-                    )
-                if (
-                    not math.isfinite(raw_value)
-                    or raw_value < 0
-                    or (prop == "phh2o" and raw_value == 0)
-                ):
-                    raise ValueError(
-                        f"SoilGrids returned an invalid estimate for {label}."
-                    )
-                results[prop] = raw_value / 10.0
+            with rasterio.io.MemoryFile(content) as memfile:
+                with memfile.open() as dataset:
+                    band = dataset.read(1, masked=True)
+                    values = np.asarray(band.filled(np.nan), dtype=float)
+                    valid = np.isfinite(values)
+                    if dataset.nodata is not None:
+                        valid &= values != float(dataset.nodata)
+                    # Soil pH is encoded as pH × 10; zero is not a plausible pH.
+                    if prop == "phh2o":
+                        valid &= (values >= 30) & (values <= 110)
+                    else:
+                        valid &= (values >= 0) & (values <= 1000)
 
-    texture_sum = results["sand"] + results["silt"] + results["clay"]
-    results["texture_sum_pct"] = texture_sum
+                    if not valid.any():
+                        raise ValueError("No valid pixel in the requested neighbourhood.")
+
+                    # Select the nearest valid cell centre to the requested point.
+                    rows, cols = np.where(valid)
+                    candidate_distances = []
+                    for row, col in zip(rows, cols):
+                        px, py = rasterio.transform.xy(dataset.transform, int(row), int(col), offset="center")
+                        candidate_distances.append(math.hypot(px - x, py - y))
+                    best = int(np.argmin(candidate_distances))
+                    raw_value = float(values[rows[best], cols[best]])
+                    distances[prop] = round(float(candidate_distances[best]), 1)
+                    results[prop] = raw_value / 10.0
+        except Exception as exc:
+            failures[prop] = str(exc)
+            results[prop] = None
+            distances[prop] = None
+
+    available_texture = all(results.get(k) is not None for k in ("sand", "silt", "clay"))
+    if not any(results.get(k) is not None for k in properties):
+        detail = "; ".join(f"{properties[k]}: {v}" for k, v in failures.items())
+        raise ValueError(
+            "SoilGrids has no valid soil estimates for this coordinate or its nearby grid cells. "
+            + detail
+        )
+
+    if available_texture:
+        texture_sum = results["sand"] + results["silt"] + results["clay"]
+        results["texture_sum_pct"] = texture_sum
+    else:
+        results["texture_sum_pct"] = None
+
+    results["sample_distance_m"] = distances
+    results["property_errors"] = failures
     results["depth"] = "0–5 cm"
     results["source"] = "ISRIC SoilGrids 2.0 WCS"
     results["quantile"] = "Mean"
@@ -600,23 +611,10 @@ if page == "Overview":
         map_view = folium.Map(
             location=[st.session_state.selected_lat, st.session_state.selected_lon],
             zoom_start=2 if st.session_state.climate_location is None else 5,
-            tiles=None,
+            tiles="OpenStreetMap",
             min_zoom=1,
             max_zoom=18,
-            control_scale=True,
         )
-        # Use Esri's World Street Map instead of the default OSM tiles.
-        # This basemap generally uses English map labels for international viewers.
-        folium.TileLayer(
-            tiles=(
-                "https://server.arcgisonline.com/ArcGIS/rest/services/"
-                "World_Street_Map/MapServer/tile/{z}/{y}/{x}"
-            ),
-            attr="Tiles © Esri — Sources: Esri, TomTom, Garmin, FAO, NOAA, USGS",
-            name="World Street Map (English labels)",
-            overlay=False,
-            control=False,
-        ).add_to(map_view)
         folium.Marker(
             [st.session_state.selected_lat, st.session_state.selected_lon],
             tooltip="Selected SmartCrop location",
@@ -849,7 +847,7 @@ elif page == "Soil Analysis":
                 soil_result = fetch_soilgrids_point(*selected_point)
             st.session_state.selected_soil = soil_result
             st.session_state.soil_location = selected_point
-            st.session_state.location_soil_ph = soil_result["phh2o"]
+            st.session_state.location_soil_ph = soil_result.get("phh2o")
 
             climate_is_current = (
                 not st.session_state.selected_climate.empty
@@ -860,15 +858,26 @@ elif page == "Soil Analysis":
                     st.session_state.selected_climate,
                     ecological,
                     catalog,
-                    soil_ph=soil_result["phh2o"],
+                    soil_ph=soil_result.get("phh2o"),
                 )
                 st.session_state.location_rotations = build_location_rotations(
                     st.session_state.location_suitability
                 )
-            st.success(
-                "SoilGrids data loaded. Soil pH was added to the crop screening "
-                "where climate data are already available."
-            )
+            if soil_result.get("phh2o") is None:
+                st.warning(
+                    "SoilGrids returned texture data but no valid pH estimate for this coordinate. "
+                    "Crop screening continues without the pH component."
+                )
+            elif soil_result.get("property_errors"):
+                st.warning(
+                    "Some SoilGrids properties were unavailable. Available properties are shown; "
+                    "missing values are not imputed."
+                )
+            else:
+                st.success(
+                    "SoilGrids data loaded. Soil pH was added to crop screening "
+                    "where climate data are available."
+                )
             st.rerun()
         except Exception as exc:
             st.error(f"SoilGrids data could not be loaded: {exc}")
@@ -880,40 +889,49 @@ elif page == "Soil Analysis":
             f"{selected_point[0]:.4f}, {selected_point[1]:.4f}"
         )
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Soil pH (H₂O)", fmt(soil_values["phh2o"], 2))
-        m2.metric("Sand", f'{fmt(soil_values["sand"], 1)}%')
-        m3.metric("Silt", f'{fmt(soil_values["silt"], 1)}%')
-        m4.metric("Clay", f'{fmt(soil_values["clay"], 1)}%')
+        ph_value = soil_values.get("phh2o")
+        m1.metric("Soil pH (H₂O)", fmt(ph_value, 2) if ph_value is not None else "Not available")
+        for column, key, label in [(m2, "sand", "Sand"), (m3, "silt", "Silt"), (m4, "clay", "Clay")]:
+            value = soil_values.get(key)
+            column.metric(label, f"{fmt(value, 1)}%" if value is not None else "Not available")
 
-        texture_df = pd.DataFrame({
-            "Soil particle": ["Sand", "Silt", "Clay"],
-            "Percentage": [
-                soil_values["sand"], soil_values["silt"], soil_values["clay"]
-            ],
-        })
-        section("Topsoil texture composition · 0–5 cm")
-        fig = px.bar(
-            texture_df,
-            x="Percentage",
-            y="Soil particle",
-            orientation="h",
-            text_auto=".1f",
-            color="Soil particle",
-            title="Estimated soil texture fractions (%)",
-        )
-        fig.update_layout(
-            template="plotly_white",
-            height=300,
-            showlegend=False,
-            margin=dict(l=15, r=15, t=35, b=15),
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-        st.caption(
-            f"Texture fractions total: {fmt(soil_values['texture_sum_pct'], 1)}%. "
-            "Small differences from 100% can occur because these are independently "
-            "modelled estimates."
-        )
+        texture_values = {
+            "sand": soil_values.get("sand"),
+            "silt": soil_values.get("silt"),
+            "clay": soil_values.get("clay"),
+        }
+        available_texture = {k: v for k, v in texture_values.items() if v is not None}
+        if available_texture:
+            texture_df = pd.DataFrame({
+                "Soil particle": [k.capitalize() for k in available_texture],
+                "Percentage": list(available_texture.values()),
+            })
+            section("Topsoil texture composition · 0–5 cm")
+            fig = px.bar(
+                texture_df,
+                x="Percentage",
+                y="Soil particle",
+                orientation="h",
+                text_auto=".1f",
+                color="Soil particle",
+                title="Estimated soil texture fractions (%)",
+            )
+            fig.update_layout(
+                template="plotly_white", height=300, showlegend=False,
+                margin=dict(l=15, r=15, t=35, b=15),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        if soil_values.get("texture_sum_pct") is not None:
+            st.caption(
+                f"Texture fractions total: {fmt(soil_values['texture_sum_pct'], 1)}%. "
+                "Small differences from 100% can occur because these are independently modelled estimates."
+            )
+        else:
+            st.caption("Some texture fractions are unavailable at this coordinate; missing values are not estimated or filled in.")
+        if soil_values.get("sample_distance_m"):
+            st.caption("Nearest valid SoilGrids pixel distance (m): " + ", ".join(
+                f"{k}: {v if v is not None else 'N/A'}" for k, v in soil_values["sample_distance_m"].items()
+            ))
         st.caption(
             "Source: ISRIC SoilGrids 2.0 WCS · 250 m grid · mean prediction · 0–5 cm. "
             "These are model estimates, not field measurements."
