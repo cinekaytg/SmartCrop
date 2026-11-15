@@ -438,12 +438,102 @@ def range_fit(value, opt_min, opt_max, abs_min, abs_max):
     return 0.0
 
 
-def build_location_suitability(climate_df, ecological, catalog, soil_ph=None):
+def classify_usda_texture(sand, silt, clay):
+    """Classify mineral-soil texture from sand/silt/clay percentages.
+
+    This deterministic USDA-triangle approximation is used only to map the
+    broad ECOCROP texture descriptors (light/medium/heavy), not as a lab result.
     """
-    Transparent location screening.
-    Uses 1991-2020 annual climate normals and ECOCROP annual limits.
-    A crop outside any available absolute limit is marked ineligible.
-    """
+    values = [sand, silt, clay]
+    if any(v is None or pd.isna(v) for v in values):
+        return None
+    sand, silt, clay = [max(0.0, float(v)) for v in values]
+    total = sand + silt + clay
+    if not (70.0 <= total <= 130.0):
+        return None
+    sand, silt, clay = [v * 100.0 / total for v in (sand, silt, clay)]
+
+    if sand >= 85 and (silt + 1.5 * clay) < 15:
+        return "sand"
+    if sand >= 70 and (silt + 2.0 * clay) < 30:
+        return "loamy sand"
+    if clay >= 40:
+        if silt >= 40:
+            return "silty clay"
+        if sand >= 45:
+            return "sandy clay"
+        return "clay"
+    if clay >= 27:
+        if silt >= 40 and sand <= 20:
+            return "silty clay loam"
+        if sand > 45:
+            return "sandy clay loam"
+        return "clay loam"
+    if clay >= 20:
+        if sand > 52:
+            return "sandy clay loam"
+        if silt >= 50:
+            return "silt loam"
+        return "clay loam"
+    if clay >= 7:
+        if sand > 52:
+            return "sandy loam"
+        if silt >= 50:
+            return "silt loam"
+        return "loam"
+    if silt >= 80:
+        return "silt"
+    if silt >= 50:
+        return "silt loam"
+    if sand >= 70:
+        return "loamy sand"
+    if sand > 52:
+        return "sandy loam"
+    return "loam"
+
+
+def texture_group(texture_class):
+    if texture_class in {"sand", "loamy sand", "sandy loam"}:
+        return "light"
+    if texture_class in {"loam", "silt loam", "silt"}:
+        return "medium"
+    if texture_class in {
+        "sandy clay loam", "clay loam", "silty clay loam",
+        "sandy clay", "silty clay", "clay"
+    }:
+        return "heavy"
+    return None
+
+
+def texture_fit_score(texture_class, optimal_textures, absolute_textures):
+    """Score broad texture compatibility without inventing missing ECOCROP data."""
+    if not texture_class:
+        return None
+    actual_group = texture_group(texture_class)
+    if not actual_group:
+        return None
+
+    def parse_groups(raw):
+        if raw is None or pd.isna(raw):
+            return set()
+        return {part.strip().lower() for part in str(raw).split(",") if part.strip()}
+
+    optimal = parse_groups(optimal_textures)
+    absolute = parse_groups(absolute_textures)
+    if "wide" in optimal or "wide" in absolute:
+        return 100.0
+    # ECOCROP uses qualitative categories; 'organic' is not a mineral texture class.
+    if actual_group in optimal:
+        return 100.0
+    if actual_group in absolute:
+        return 60.0
+    if absolute:
+        return 0.0
+    return None
+
+
+def build_location_suitability(climate_df, ecological, catalog, soil_ph=None, soil_texture=None):
+    """Location screening using 1991–2020 climate normals and available soil estimates."""
     if climate_df.empty or ecological.empty:
         return pd.DataFrame()
 
@@ -455,21 +545,24 @@ def build_location_suitability(climate_df, ecological, catalog, soil_ph=None):
     temperature_values = pd.to_numeric(climate_df[temp_col], errors="coerce")
     rainfall_values = pd.to_numeric(climate_df[rain_col], errors="coerce")
     days_col = col(climate_df, ["days_in_month"])
-
     if days_col:
         day_weights = pd.to_numeric(climate_df[days_col], errors="coerce")
         valid_temp = temperature_values.notna() & day_weights.notna()
         annual_temp = (
             (temperature_values[valid_temp] * day_weights[valid_temp]).sum()
             / day_weights[valid_temp].sum()
-            if valid_temp.any() and day_weights[valid_temp].sum() > 0
-            else float("nan")
+            if valid_temp.any() and day_weights[valid_temp].sum() > 0 else float("nan")
         )
     else:
         annual_temp = temperature_values.mean()
-
     annual_rain = rainfall_values.sum(min_count=1)
     ph_available = soil_ph is not None and not pd.isna(soil_ph)
+
+    texture_class = None
+    if soil_texture:
+        texture_class = classify_usda_texture(
+            soil_texture.get("sand"), soil_texture.get("silt"), soil_texture.get("clay")
+        )
 
     rows = []
     for _, crop in ecological.iterrows():
@@ -488,26 +581,29 @@ def build_location_suitability(climate_df, ecological, catalog, soil_ph=None):
                 float(soil_ph), crop.get("ph_opt_min"), crop.get("ph_opt_max"),
                 crop.get("ph_abs_min"), crop.get("ph_abs_max")
             )
+        texture_score = texture_fit_score(
+            texture_class, crop.get("texture_optimal"), crop.get("texture_absolute")
+        ) if texture_class else None
 
-        # Hard eligibility gate: a high pH/rainfall score cannot hide a crop
-        # falling outside the absolute temperature or rainfall tolerance.
         critical_scores = [temp_score, rain_score]
         if ph_available:
             critical_scores.append(ph_score)
+        if texture_score is not None:
+            critical_scores.append(texture_score)
         critical_data_complete = all(v is not None for v in critical_scores)
         outside_absolute_limit = (
             critical_data_complete and any(float(v) <= 0 for v in critical_scores)
         )
 
-        # Weighted score: temperature 40%, annual rainfall 35%, soil pH 25%.
-        # If pH is unavailable, climate-only weights are re-normalized.
+        # Transparent weights: temperature 30%, annual rainfall 25%, pH 20%,
+        # texture 25%. Missing components are excluded and remaining weights renormalized.
         weighted_parts = []
-        if temp_score is not None:
-            weighted_parts.append((float(temp_score), 0.40))
-        if rain_score is not None:
-            weighted_parts.append((float(rain_score), 0.35))
-        if ph_score is not None:
-            weighted_parts.append((float(ph_score), 0.25))
+        for value, weight in [
+            (temp_score, 0.30), (rain_score, 0.25),
+            (ph_score, 0.20), (texture_score, 0.25),
+        ]:
+            if value is not None and not pd.isna(value):
+                weighted_parts.append((float(value), weight))
         weight_total = sum(weight for _, weight in weighted_parts)
         weighted_score = (
             sum(value * weight for value, weight in weighted_parts) / weight_total
@@ -518,33 +614,31 @@ def build_location_suitability(climate_df, ecological, catalog, soil_ph=None):
         cat = catalog[catalog["crop_id"] == crop["crop_id"]]
         crop_name = cat.iloc[0]["crop_name_en"] if not cat.empty else str(crop["crop_id"]).title()
         crop_group = cat.iloc[0]["crop_group"] if not cat.empty else "Unknown"
-
         if outside_absolute_limit:
             eligibility = "Outside absolute limits"
         elif not critical_data_complete:
             eligibility = "Incomplete data"
-        elif ph_available:
+        elif ph_available and texture_class is not None:
             eligibility = "Eligible for screening"
+        elif ph_available or texture_class is not None:
+            eligibility = "Partial soil screening"
         else:
             eligibility = "Climate-only screening"
 
         rows.append({
-            "crop_id": crop["crop_id"],
-            "Crop": crop_name,
-            "Crop group": crop_group,
-            "Temperature fit": temp_score,
-            "Annual rainfall fit": rain_score,
-            "Soil pH fit": ph_score,
-            "Preliminary score": score,
+            "crop_id": crop["crop_id"], "Crop": crop_name, "Crop group": crop_group,
+            "Temperature fit": temp_score, "Annual rainfall fit": rain_score,
+            "Soil pH fit": ph_score, "Soil texture class": texture_class,
+            "Soil texture fit": texture_score, "Preliminary score": score,
             "Eligibility": eligibility,
-            "Data components": sum(v is not None for v in [temp_score, rain_score, ph_score]),
+            "Data components": sum(v is not None and not pd.isna(v) for v in
+                                    [temp_score, rain_score, ph_score, texture_score]),
         })
 
     result = pd.DataFrame(rows)
     return result.sort_values(
         ["Preliminary score", "Crop"], ascending=[False, True], na_position="last"
     )
-
 
 def build_location_rotations(suitability):
     """
@@ -582,20 +676,19 @@ def build_location_rotations(suitability):
         groups = [str(a["Crop group"]), str(b["Crop group"]), str(c["Crop group"])]
         if len(set(ids)) != 3:
             continue
-        if groups[0].lower() == groups[1].lower() or groups[1].lower() == groups[2].lower():
+        # A three-year sequence must rotate across three distinct crop groups.
+        # This prevents cereal -> oilseed -> cereal from being ranked as a diverse rotation.
+        if len(set(group.lower() for group in groups)) != 3:
             continue
 
         scores = [float(a["Preliminary score"]), float(b["Preliminary score"]), float(c["Preliminary score"])]
-        # Stable tie-break: prefer sequences with three distinct crop groups,
-        # then use names for reproducible ordering.
-        diversity = len(set(group.lower() for group in groups))
+        # Deterministic ordering for reproducible results.
         candidates.append({
             "Year 1": a["Crop"],
             "Year 2": b["Crop"],
             "Year 3": c["Crop"],
             "Crop group sequence": f'{groups[0]} → {groups[1]} → {groups[2]}',
             "Mean screening score": sum(scores) / 3,
-            "Group diversity": diversity,
             "Sequence key": " | ".join(ids),
         })
 
@@ -603,11 +696,11 @@ def build_location_rotations(suitability):
         return pd.DataFrame()
 
     result = pd.DataFrame(candidates).sort_values(
-        ["Mean screening score", "Group diversity", "Sequence key"],
-        ascending=[False, False, True],
+        ["Mean screening score", "Sequence key"],
+        ascending=[False, True],
         kind="mergesort",
     ).head(15)
-    return result.drop(columns=["Group diversity", "Sequence key"]).reset_index(drop=True)
+    return result.drop(columns=["Sequence key"]).reset_index(drop=True)
 
 
 if not DB_PATH.exists():
@@ -801,7 +894,8 @@ if page == "Overview":
                 selected_ph = matching_soil.get("phh2o") if matching_soil else None
                 st.session_state.location_soil_ph = selected_ph
                 st.session_state.location_suitability = build_location_suitability(
-                    result, ecological, catalog, soil_ph=selected_ph
+                    result, ecological, catalog, soil_ph=selected_ph,
+                    soil_texture=matching_soil
                 )
                 st.session_state.location_rotations = build_location_rotations(
                     st.session_state.location_suitability
@@ -978,6 +1072,7 @@ elif page == "Soil Analysis":
                     ecological,
                     catalog,
                     soil_ph=soil_result.get("phh2o"),
+                    soil_texture=soil_result,
                 )
                 st.session_state.location_rotations = build_location_rotations(
                     st.session_state.location_suitability
@@ -1105,7 +1200,7 @@ elif page == "Crop Suitability":
                               margin=dict(l=15, r=15, t=20, b=15))
             st.plotly_chart(fig, use_container_width=True)
         display = view.drop(columns=["crop_id"]).copy()
-        for c in ["Temperature fit", "Annual rainfall fit", "Soil pH fit", "Preliminary score"]:
+        for c in ["Temperature fit", "Annual rainfall fit", "Soil pH fit", "Soil texture fit", "Preliminary score"]:
             display[c] = display[c].map(lambda x: "Not available" if pd.isna(x) else fmt(x))
         st.dataframe(display, hide_index=True, use_container_width=True)
         soil_is_current_for_crop = (
@@ -1116,8 +1211,8 @@ elif page == "Crop Suitability":
         )
         if soil_is_current_for_crop:
             st.info(
-                "Soil pH from SoilGrids is included for this coordinate. "
-                "Soil texture is displayed in Soil Analysis but is not yet part of the score."
+                "SoilGrids pH and texture are included where valid for this coordinate. "
+                "Texture compatibility uses broad ECOCROP light/medium/heavy categories."
             )
         else:
             st.warning(
@@ -1125,10 +1220,11 @@ elif page == "Crop Suitability":
                 "Load SoilGrids data for this same coordinate in Soil Analysis to include soil pH."
             )
         st.caption(
-            "Scores are screening indicators, not yield predictions or agronomic prescriptions. "
-            "Temperature (40%), annual rainfall (35%), and soil pH (25%) are weighted when available. "
-            "Crops outside any available absolute ECOCROP limit are marked ineligible. "
-            "Annual indicators do not replace crop-season or field-level assessment."
+            "Scores are preliminary screening indicators, not yield predictions or agronomic prescriptions. "
+            "Weights when available: temperature 30%, annual rainfall 25%, soil pH 20%, and soil texture 25%; "
+            "missing components are excluded and weights are renormalized. Texture is mapped to broad "
+            "light/medium/heavy ECOCROP descriptors. Annual indicators do not replace crop-season or "
+            "field-level assessment."
         )
     else:
         st.info(
@@ -1191,7 +1287,7 @@ elif page == "Crop Rotation":
             )
         st.caption(
             "Only eligible annual crops are considered. Perennial crops such as olive are excluded. "
-            "Each crop appears once, and adjacent years must belong to different crop groups."
+            "Each crop appears once and all three years must belong to distinct crop groups."
         )
 
 elif page == "Data Sources":
@@ -1215,14 +1311,14 @@ elif page == "Data Sources":
     limitations = [
         "Selected-point climate data are fetched from the NASA POWER Monthly Point API for the 1991–2020 reference period. This is a historical 30-year baseline, not a forecast.",
         "NASA POWER grid resolution varies by parameter; nearby selected points may return the same grid-cell data.",
-        "Global point selection fetches NASA POWER climate data and SoilGrids topsoil estimates. When both are available for the same point, crop screening includes temperature, annual rainfall, and soil pH fits.",
+        "Global point selection fetches NASA POWER climate data and SoilGrids topsoil estimates. When available for the same point, crop screening includes temperature, annual rainfall, soil pH, and broad soil-texture compatibility; crops without an ECOCROP texture requirement are not penalized for missing texture metadata.",
         "SoilGrids 0–5 cm pH and texture values are gridded model estimates and have not been validated with field soil samples.",
         "The Antalya pilot pH value is a nearest-valid-pixel estimate. It is not reused for other selected locations.",
         "Rainfall fit compares the mean annual precipitation total derived from 1991–2020 monthly climate records with ECOCROP reference ranges. It is not irrigation demand.",
-        "For a selected location, the preliminary screening score is the equal-weighted mean of available temperature, annual-rainfall, and soil-pH fits. Temperature is calculated as a day-weighted mean of the 12 long-term monthly means. Soil texture is displayed but is not yet scored against ECOCROP texture categories.",
+        "For a selected location, the preliminary score combines available temperature (30%), annual rainfall (25%), soil pH (20%), and soil texture (25%) fits; missing components are excluded and weights are renormalized. Temperature is a day-weighted annual mean of monthly normals. Texture is classified approximately using the USDA textural triangle and mapped to broad ECOCROP light/medium/heavy descriptors; it is not a laboratory soil classification.",
         "Root-zone water storage is estimated using generalized rooting-depth references and SoilGrids layer values.",
         "Root-zone storage is not plant water uptake at a particular date and is not an irrigation prescription.",
-        "The rotation generator does not model field history, planting calendars, pests, diseases, nutrient balances, soil carbon, irrigation, or economics.",
+        "The rotation generator uses only crops passing the current screening eligibility and requires three distinct crop groups in each three-year sequence. Perennial crops such as olive are excluded. It does not model field history, planting calendars, pests, diseases, nutrient balances, soil carbon, irrigation, or economics.",
         "Missing crop requirement data remain missing; they are not converted to zero.",
     ]
     for item in limitations:
