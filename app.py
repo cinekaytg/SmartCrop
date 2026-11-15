@@ -231,10 +231,13 @@ def fetch_soilgrids_point(latitude, longitude):
     crs_uri = "http://www.opengis.net/def/crs/EPSG/0/152160"
     properties = {"phh2o": "Soil pH", "sand": "Sand", "silt": "Silt", "clay": "Clay"}
     rasters, failures, distances = {}, {}, {}
-    session = requests.Session()
-    session.headers.update({"User-Agent": "SmartCrop/1.0 (SoilGrids WCS client)"})
-
     def get_raster(prop):
+        """Fetch one SoilGrids layer with a bounded timeout.
+
+        The four WCS layers are requested concurrently below. A single bounded
+        request per layer prevents sequential retry delays from leaving the UI
+        apparently loading for several minutes.
+        """
         endpoint = f"https://maps.isric.org/mapserv?map=/map/{prop}.map"
         params = [
             ("SERVICE", "WCS"), ("VERSION", "2.0.1"),
@@ -243,46 +246,52 @@ def fetch_soilgrids_point(latitude, longitude):
             ("SUBSETTINGCRS", crs_uri), ("OUTPUTCRS", crs_uri),
             ("RESX", "250"), ("RESY", "250"),
         ]
-        last_error = None
-        for attempt in range(3):
-            try:
-                response = session.get(endpoint, params=params, timeout=(15, 90))
-                response.raise_for_status()
-                content = response.content
-                # GeoTIFF classic signatures; reject XML exception documents even on HTTP 200.
-                if content[:4] not in (b"II*\x00", b"MM\x00*"):
-                    detail = content[:500].decode("utf-8", errors="replace")
-                    raise RuntimeError(
-                        f"WCS returned {response.headers.get('Content-Type', 'unknown content')} "
-                        f"instead of GeoTIFF: {detail[:350]}"
-                    )
-                with rasterio.io.MemoryFile(content) as memfile:
-                    with memfile.open() as ds:
-                        arr = ds.read(1, masked=True)
-                        values = np.asarray(arr.filled(np.nan), dtype=float)
-                        valid = np.isfinite(values) & (ds.read_masks(1) > 0)
-                        if ds.nodata is not None:
-                            valid &= values != float(ds.nodata)
-                        # Values are integer encoded: pH x10; texture g/kg.
-                        if prop == "phh2o":
-                            valid &= (values >= 30) & (values <= 110)
-                        else:
-                            # 0 is valid for a particle fraction; only negative/over-range
-                            # values and the raster's explicit NoData mask are rejected.
-                            valid &= (values >= 0) & (values <= 1000)
-                        return values.copy(), valid.copy(), ds.transform, ds.crs
-            except Exception as exc:
-                last_error = exc
-                if attempt < 2:
-                    import time
-                    time.sleep(1.5 * (attempt + 1))
-        raise RuntimeError(str(last_error))
+        response = requests.get(
+            endpoint,
+            params=params,
+            headers={"User-Agent": "SmartCrop/1.1 (SoilGrids WCS client)"},
+            timeout=(8, 30),
+        )
+        response.raise_for_status()
+        content = response.content
 
-    for prop in properties:
-        try:
-            rasters[prop] = get_raster(prop)
-        except Exception as exc:
-            failures[prop] = str(exc)
+        # GeoTIFF classic signatures; reject XML exception documents even on HTTP 200.
+        if content[:4] not in (b"II*\\x00", b"MM\\x00*"):
+            detail = content[:500].decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"WCS returned {response.headers.get('Content-Type', 'unknown content')} "
+                f"instead of GeoTIFF: {detail[:350]}"
+            )
+
+        with rasterio.io.MemoryFile(content) as memfile:
+            with memfile.open() as ds:
+                arr = ds.read(1, masked=True)
+                values = np.asarray(arr.filled(np.nan), dtype=float)
+                valid = np.isfinite(values) & (ds.read_masks(1) > 0)
+                if ds.nodata is not None:
+                    valid &= values != float(ds.nodata)
+                # Values are integer encoded: pH x10; texture g/kg.
+                if prop == "phh2o":
+                    valid &= (values >= 30) & (values <= 110)
+                else:
+                    # Zero is a valid particle fraction; reject only NoData and out-of-range values.
+                    valid &= (values >= 0) & (values <= 1000)
+                return values.copy(), valid.copy(), ds.transform, ds.crs
+
+    # Parallel requests keep the total wait close to one request timeout,
+    # rather than four sequential 90-second waits.
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        future_to_prop = {
+            executor.submit(get_raster, prop): prop for prop in properties
+        }
+        for future in as_completed(future_to_prop):
+            prop = future_to_prop[future]
+            try:
+                rasters[prop] = future.result()
+            except Exception as exc:
+                failures[prop] = f"{type(exc).__name__}: {exc}"
 
     results = {key: None for key in properties}
     # Choose one shared pixel for all three texture fractions. This avoids
