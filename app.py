@@ -195,14 +195,14 @@ def fetch_nasa_power_climate_normals(latitude, longitude, start_year=1991, end_y
 
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
+@st.cache_data(ttl=21600, show_spinner=False)
 def fetch_soilgrids_point(latitude, longitude):
-    """Fetch SoilGrids 0–5 cm mean predictions using ISRIC WCS.
+    """Fetch 0–5 cm SoilGrids mean estimates via WCS.
 
-    Each property is handled independently: a missing pH pixel must not discard
-    valid texture estimates. If the requested pixel is masked, the nearest
-    valid pixel in the small requested window is used and its distance is
-    reported. SoilGrids native values are divided by 10 (ISRIC metadata).
+    Texture fractions are sampled from the same raster cell so that sand,
+    silt and clay form a coherent composition. Zero is a valid fraction and
+    is therefore not treated as NoData. pH is sampled independently because
+    its coverage can have a different valid-data mask.
     """
     try:
         import numpy as np
@@ -213,8 +213,7 @@ def fetch_soilgrids_point(latitude, longitude):
             "SoilGrids dependencies are missing. Install rasterio, pyproj, and numpy."
         ) from exc
 
-    latitude = float(latitude)
-    longitude = float(longitude)
+    latitude, longitude = float(latitude), float(longitude)
     if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
         raise ValueError("Coordinates are outside valid latitude/longitude bounds.")
 
@@ -224,95 +223,131 @@ def fetch_soilgrids_point(latitude, longitude):
     if not (math.isfinite(x) and math.isfinite(y)):
         raise ValueError("Could not project this coordinate into the SoilGrids grid.")
 
-    # A 1.25 km-wide request provides neighbouring 250 m cells when the
-    # centre pixel is masked (e.g. mixed land/urban/coastal cells).
-    half_window = 625.0
+    half_window = 1000.0  # request a 2 km neighbourhood at native 250 m resolution
     subsets = [
-        ("SUBSET", f"X({x - half_window},{x + half_window})"),
-        ("SUBSET", f"Y({y - half_window},{y + half_window})"),
+        ("SUBSET", f"X({x-half_window:.2f},{x+half_window:.2f})"),
+        ("SUBSET", f"Y({y-half_window:.2f},{y+half_window:.2f})"),
     ]
     crs_uri = "http://www.opengis.net/def/crs/EPSG/0/152160"
     properties = {"phh2o": "Soil pH", "sand": "Sand", "silt": "Silt", "clay": "Clay"}
-    results = {}
-    distances = {}
-    failures = {}
+    rasters, failures, distances = {}, {}, {}
+    session = requests.Session()
+    session.headers.update({"User-Agent": "SmartCrop/1.0 (SoilGrids WCS client)"})
 
-    for prop, label in properties.items():
+    def get_raster(prop):
         endpoint = f"https://maps.isric.org/mapserv?map=/map/{prop}.map"
         params = [
             ("SERVICE", "WCS"), ("VERSION", "2.0.1"),
-            ("REQUEST", "GetCoverage"),
-            ("COVERAGEID", f"{prop}_0-5cm_mean"),
+            ("REQUEST", "GetCoverage"), ("COVERAGEID", f"{prop}_0-5cm_mean"),
             ("FORMAT", "GEOTIFF_INT16"), *subsets,
             ("SUBSETTINGCRS", crs_uri), ("OUTPUTCRS", crs_uri),
             ("RESX", "250"), ("RESY", "250"),
         ]
+        last_error = None
+        for attempt in range(3):
+            try:
+                response = session.get(endpoint, params=params, timeout=(15, 90))
+                response.raise_for_status()
+                content = response.content
+                # GeoTIFF classic signatures; reject XML exception documents even on HTTP 200.
+                if content[:4] not in (b"II*\x00", b"MM\x00*"):
+                    detail = content[:500].decode("utf-8", errors="replace")
+                    raise RuntimeError(
+                        f"WCS returned {response.headers.get('Content-Type', 'unknown content')} "
+                        f"instead of GeoTIFF: {detail[:350]}"
+                    )
+                with rasterio.io.MemoryFile(content) as memfile:
+                    with memfile.open() as ds:
+                        arr = ds.read(1, masked=True)
+                        values = np.asarray(arr.filled(np.nan), dtype=float)
+                        valid = np.isfinite(values) & (ds.read_masks(1) > 0)
+                        if ds.nodata is not None:
+                            valid &= values != float(ds.nodata)
+                        # Values are integer encoded: pH x10; texture g/kg.
+                        if prop == "phh2o":
+                            valid &= (values >= 30) & (values <= 110)
+                        else:
+                            # 0 is valid for a particle fraction; only negative/over-range
+                            # values and the raster's explicit NoData mask are rejected.
+                            valid &= (values >= 0) & (values <= 1000)
+                        return values.copy(), valid.copy(), ds.transform, ds.crs
+            except Exception as exc:
+                last_error = exc
+                if attempt < 2:
+                    import time
+                    time.sleep(1.5 * (attempt + 1))
+        raise RuntimeError(str(last_error))
+
+    for prop in properties:
         try:
-            response = requests.get(endpoint, params=params, timeout=75)
-            response.raise_for_status()
-            content = response.content
-            if content[:4] not in (b"II*\x00", b"MM\x00*"):
-                detail = content[:300].decode("utf-8", errors="replace")
-                raise RuntimeError(f"WCS did not return GeoTIFF data: {detail}")
-
-            with rasterio.io.MemoryFile(content) as memfile:
-                with memfile.open() as dataset:
-                    band = dataset.read(1, masked=True)
-                    values = np.asarray(band.filled(np.nan), dtype=float)
-                    valid = np.isfinite(values) & (dataset.read_masks(1) > 0)
-                    if dataset.nodata is not None:
-                        valid &= values != float(dataset.nodata)
-                    # Soil pH is encoded as pH × 10; zero is not a plausible pH.
-                    if prop == "phh2o":
-                        valid &= (values >= 30) & (values <= 110)
-                    else:
-                        # Soil texture is stored as g/kg (0–1000) and converted
-                        # to percent by dividing by 10. A zero-valued pixel is
-                        # not a credible complete texture estimate; treating it
-                        # as valid caused empty, zero-width charts at some points.
-                        valid &= (values > 0) & (values <= 1000)
-
-                    if not valid.any():
-                        raise ValueError("No valid pixel in the requested neighbourhood.")
-
-                    # Select the nearest valid cell centre to the requested point.
-                    rows, cols = np.where(valid)
-                    candidate_distances = []
-                    for row, col in zip(rows, cols):
-                        px, py = rasterio.transform.xy(dataset.transform, int(row), int(col), offset="center")
-                        candidate_distances.append(math.hypot(px - x, py - y))
-                    best = int(np.argmin(candidate_distances))
-                    raw_value = float(values[rows[best], cols[best]])
-                    distances[prop] = round(float(candidate_distances[best]), 1)
-                    results[prop] = raw_value / 10.0
+            rasters[prop] = get_raster(prop)
         except Exception as exc:
             failures[prop] = str(exc)
-            results[prop] = None
-            distances[prop] = None
 
-    available_texture = all(results.get(k) is not None for k in ("sand", "silt", "clay"))
-    if not any(results.get(k) is not None for k in properties):
-        detail = "; ".join(f"{properties[k]}: {v}" for k, v in failures.items())
-        raise ValueError(
-            "SoilGrids has no valid soil estimates for this coordinate or its nearby grid cells. "
-            + detail
-        )
+    results = {key: None for key in properties}
+    # Choose one shared pixel for all three texture fractions. This avoids
+    # mixing neighbouring cells when one layer has a slightly different mask.
+    texture_props = ("sand", "silt", "clay")
+    if all(prop in rasters for prop in texture_props):
+        base_values, base_valid, base_transform, base_crs = rasters["sand"]
+        common = base_valid.copy()
+        aligned = True
+        for prop in ("silt", "clay"):
+            vals, mask, transform, crs = rasters[prop]
+            if vals.shape != base_values.shape or transform != base_transform or crs != base_crs:
+                aligned = False
+                break
+            common &= mask
+        if aligned and common.any():
+            rows, cols = np.where(common)
+            pixel_distances = []
+            for row, col_idx in zip(rows, cols):
+                px, py = rasterio.transform.xy(base_transform, int(row), int(col_idx), offset="center")
+                pixel_distances.append(math.hypot(px-x, py-y))
+            best = int(np.argmin(pixel_distances))
+            row, col_idx = int(rows[best]), int(cols[best])
+            for prop in texture_props:
+                results[prop] = float(rasters[prop][0][row, col_idx]) / 10.0
+                distances[prop] = round(float(pixel_distances[best]), 1)
+        elif not aligned:
+            failures["texture"] = "SoilGrids texture rasters were not aligned; no mixed-cell composition was calculated."
+        else:
+            failures["texture"] = "No common valid pixel for sand, silt and clay in the requested neighbourhood."
+    else:
+        missing = [prop for prop in texture_props if prop not in rasters]
+        if missing:
+            failures["texture"] = "Unavailable texture layer(s): " + ", ".join(missing)
 
-    if available_texture:
-        texture_sum = results["sand"] + results["silt"] + results["clay"]
-        # A very low/high total usually indicates a bad or misaligned raster
-        # response; do not present it as a valid texture composition.
-        if 70.0 <= texture_sum <= 130.0:
+    # pH can use its own nearest valid pixel; it is not part of the texture sum.
+    if "phh2o" in rasters:
+        values, valid, transform, _ = rasters["phh2o"]
+        if valid.any():
+            rows, cols = np.where(valid)
+            dists = []
+            for row, col_idx in zip(rows, cols):
+                px, py = rasterio.transform.xy(transform, int(row), int(col_idx), offset="center")
+                dists.append(math.hypot(px-x, py-y))
+            best = int(np.argmin(dists))
+            results["phh2o"] = float(values[rows[best], cols[best]]) / 10.0
+            distances["phh2o"] = round(float(dists[best]), 1)
+
+    if all(results.get(k) is None for k in properties):
+        detail = "; ".join(f"{properties.get(k, k)}: {v}" for k, v in failures.items())
+        raise ValueError("SoilGrids WCS returned no usable estimates. " + detail)
+
+    texture_complete = all(results.get(k) is not None for k in texture_props)
+    if texture_complete:
+        texture_sum = sum(results[k] for k in texture_props)
+        # Independently modelled fractions should be close to 100%; reject
+        # incomplete/misaligned responses rather than silently normalising them.
+        if 85.0 <= texture_sum <= 115.0:
             results["texture_sum_pct"] = texture_sum
         else:
-            for prop in ("sand", "silt", "clay"):
+            for prop in texture_props:
                 results[prop] = None
                 distances[prop] = None
             results["texture_sum_pct"] = None
-            failures["texture"] = (
-                f"Texture fractions summed to {texture_sum:.1f}%, outside the "
-                "expected broad validation range (70–130%)."
-            )
+            failures["texture"] = f"Texture fractions totalled {texture_sum:.1f}%, outside the 85–115% validation range."
     else:
         results["texture_sum_pct"] = None
 
@@ -321,7 +356,9 @@ def fetch_soilgrids_point(latitude, longitude):
     results["depth"] = "0–5 cm"
     results["source"] = "ISRIC SoilGrids 2.0 WCS"
     results["quantile"] = "Mean"
+    results["texture_complete"] = texture_complete and results["texture_sum_pct"] is not None
     return results
+
 
 
 st.markdown("""
@@ -653,7 +690,7 @@ def build_location_rotations(suitability):
     if "Eligibility" in candidates_source.columns:
         candidates_source = candidates_source[
             candidates_source["Eligibility"].isin(
-                ["Eligible for screening", "Climate-only screening"]
+                ["Eligible for screening", "Partial soil screening", "Climate-only screening"]
             )
         ]
 
@@ -883,8 +920,8 @@ if page == "Overview":
                 st.session_state.climate_location = (
                     st.session_state.selected_lat, st.session_state.selected_lon
                 )
-                # SoilGrids point-query API is currently paused. Do not reuse Antalya pH
-                # for another point. Climate-only screening is explicitly labelled.
+                # Never reuse soil values from a different coordinate. SoilGrids WCS
+                # is queried separately on the Soil Analysis page.
                 matching_soil = (
                     st.session_state.selected_soil
                     if st.session_state.soil_location == (
@@ -1116,14 +1153,15 @@ elif page == "Soil Analysis":
         }
         available_texture = {
             k: float(v) for k, v in texture_values.items()
-            if v is not None and pd.notna(v) and 0 < float(v) <= 100
+            if v is not None and pd.notna(v) and 0 <= float(v) <= 100
         }
+        texture_complete = bool(soil_values.get("texture_complete"))
         if available_texture:
             texture_df = pd.DataFrame({
                 "Soil particle": [k.capitalize() for k in available_texture],
                 "Percentage": list(available_texture.values()),
             })
-            section("Topsoil texture composition · 0–5 cm")
+            section("Topsoil texture composition · 0–5 cm" if texture_complete else "Available texture fractions · incomplete")
             fig = px.bar(
                 texture_df,
                 x="Percentage",
@@ -1152,6 +1190,12 @@ elif page == "Soil Analysis":
             )
         else:
             st.caption("Some texture fractions are unavailable at this coordinate; missing values are not estimated or filled in.")
+        if not texture_complete:
+            st.warning("The texture response is incomplete. Do not interpret the available fractions as a complete 100% soil composition or use them for texture classification.")
+        if soil_values.get("property_errors"):
+            with st.expander("SoilGrids request diagnostics"):
+                for prop_name, error_text in soil_values["property_errors"].items():
+                    st.write(f"**{prop_name}:** {error_text}")
         if soil_values.get("sample_distance_m"):
             st.caption("Nearest valid SoilGrids pixel distance (m): " + ", ".join(
                 f"{k}: {v if v is not None else 'N/A'}" for k, v in soil_values["sample_distance_m"].items()
@@ -1268,7 +1312,7 @@ elif page == "Crop Rotation":
             with right:
                 st.metric("Mean score", fmt(row["Mean screening score"]))
         st.warning(
-            "Rotation scenarios are heuristic candidates based on climate-only preliminary scores. "
+            "Rotation scenarios are heuristic candidates based on the available climate and soil screening data. "
             "They do not account for field history, planting calendars, pests, nutrient balances, "
             "irrigation constraints, or farm economics. They are not agronomic prescriptions."
         )
