@@ -649,9 +649,21 @@ def build_location_suitability(climate_df, ecological, catalog, soil_ph=None, so
             critical_scores.append(ph_score)
         if texture_score is not None:
             critical_scores.append(texture_score)
-        critical_data_complete = all(v is not None for v in critical_scores)
+        critical_data_complete = all(v is not None and not pd.isna(v) for v in critical_scores)
+
+        # Check the actual measured values against ECOCROP absolute bounds.
+        # A fit score of 0 can also occur exactly at an inclusive boundary, so
+        # using score <= 0 would incorrectly reject a crop sitting on that edge.
+        def outside_range(value, lower, upper):
+            if value is None or pd.isna(value) or lower is None or pd.isna(lower) or upper is None or pd.isna(upper):
+                return False
+            return float(value) < float(lower) or float(value) > float(upper)
+
         outside_absolute_limit = (
-            critical_data_complete and any(float(v) <= 0 for v in critical_scores)
+            outside_range(annual_temp, crop.get("temp_abs_min_c"), crop.get("temp_abs_max_c"))
+            or outside_range(annual_rain, crop.get("annual_rain_abs_min_mm"), crop.get("annual_rain_abs_max_mm"))
+            or (ph_available and outside_range(soil_ph, crop.get("ph_abs_min"), crop.get("ph_abs_max")))
+            or (texture_score is not None and float(texture_score) <= 0)
         )
 
         # Transparent weights: temperature 30%, annual rainfall 25%, pH 20%,
@@ -683,6 +695,8 @@ def build_location_suitability(climate_df, ecological, catalog, soil_ph=None, so
             eligibility = "Incomplete data"
         elif ph_available and texture_score is not None:
             eligibility = "Climate + pH + texture screening"
+        elif ph_available and texture_class and texture_score is None:
+            eligibility = "Climate + pH screening (texture criterion unavailable)"
         elif ph_available:
             eligibility = "Partial soil screening (pH only)"
         elif texture_score is not None:
@@ -722,6 +736,7 @@ def build_location_rotations(suitability):
                     "Eligible for screening",
                     "Partial soil screening",
                     "Partial soil screening (pH only)",
+                    "Climate + pH screening (texture criterion unavailable)",
                     "Partial soil screening (texture only)",
                     "Climate + pH + texture screening",
                     "Climate-only screening",
@@ -877,7 +892,10 @@ if page == "Overview":
         if overview_score_col and not overview_scores.empty else 0
     )
     a, b, c, d = st.columns(4)
-    a.metric("Selected point", "Global")
+    a.metric(
+        "Selected point",
+        f"{st.session_state.selected_lat:.4f}, {st.session_state.selected_lon:.4f}",
+    )
     b.metric("Climate records", f"{overview_climate_count} months" if screening_calculated else "Not loaded")
     c.metric("Scored crops", str(valid_scores) if screening_calculated else "Not calculated")
     d.metric(
@@ -1348,6 +1366,11 @@ elif page == "Crop Suitability":
                 "These are climate-only preliminary screening scores. "
                 "Load SoilGrids data for this same coordinate to include available soil data."
             )
+        st.info(
+            "Crop coverage: 6 crops currently have ECOCROP requirement records and are scored. "
+            "Cotton and chickpea are listed in the catalog but are not scored because their "
+            "ecological requirement records are not yet populated."
+        )
         st.caption(
             "Scores are preliminary screening indicators, not yield predictions or agronomic prescriptions. "
             "Weights when available: temperature 30%, annual rainfall 25%, soil pH 20%, and soil texture 25%; "
@@ -1447,7 +1470,8 @@ elif page == "Data Sources":
         "For a selected location, the preliminary score combines available temperature (30%), annual rainfall (25%), soil pH (20%), and soil texture (25%) fits; missing components are excluded and weights are renormalized. Temperature is a day-weighted annual mean of monthly normals. Texture is classified approximately using the USDA textural triangle and mapped to broad ECOCROP light/medium/heavy descriptors; it is not a laboratory soil classification.",
         "Root-zone water storage is estimated using generalized rooting-depth references and SoilGrids layer values.",
         "Root-zone storage is not plant water uptake at a particular date and is not an irrigation prescription.",
-        "The rotation generator uses only crops passing the current screening eligibility and requires three distinct crop groups in each three-year sequence. Perennial crops such as olive are excluded. It does not model field history, planting calendars, pests, diseases, nutrient balances, soil carbon, irrigation, or economics.",
+        "The rotation generator uses only crops passing the current screening eligibility and requires three distinct crop groups in each three-year sequence. Perennial crops such as olive are excluded. Climate-only or partial-soil rotations are explicitly preliminary when SoilGrids properties are unavailable. It does not model field history, planting calendars, pests, diseases, nutrient balances, soil carbon, irrigation, or economics.",
+        "The current database has 8 catalogued crops; 6 have populated ECOCROP requirement records and are included in scoring. Cotton and chickpea are not scored until their requirement records are added.",
         "Missing crop requirement data remain missing; they are not converted to zero.",
     ]
     for item in limitations:
