@@ -668,10 +668,12 @@ def build_location_suitability(climate_df, ecological, catalog, soil_ph=None, so
             eligibility = "Outside absolute limits"
         elif not critical_data_complete:
             eligibility = "Incomplete data"
-        elif ph_available and texture_class is not None:
-            eligibility = "Eligible for screening"
-        elif ph_available or texture_class is not None:
-            eligibility = "Partial soil screening"
+        elif ph_available and texture_score is not None:
+            eligibility = "Climate + pH + texture screening"
+        elif ph_available:
+            eligibility = "Partial soil screening (pH only)"
+        elif texture_score is not None:
+            eligibility = "Partial soil screening (texture only)"
         else:
             eligibility = "Climate-only screening"
 
@@ -703,7 +705,14 @@ def build_location_rotations(suitability):
     if "Eligibility" in candidates_source.columns:
         candidates_source = candidates_source[
             candidates_source["Eligibility"].isin(
-                ["Eligible for screening", "Partial soil screening", "Climate-only screening"]
+                [
+                    "Eligible for screening",
+                    "Partial soil screening",
+                    "Partial soil screening (pH only)",
+                    "Partial soil screening (texture only)",
+                    "Climate + pH + texture screening",
+                    "Climate-only screening",
+                ]
             )
         ]
 
@@ -855,11 +864,7 @@ if page == "Overview":
         if overview_score_col and not overview_scores.empty else 0
     )
     a, b, c, d = st.columns(4)
-    a.metric(
-        "Selected point",
-        f"{st.session_state.selected_lat:.2f}, {st.session_state.selected_lon:.2f}"
-        if screening_calculated else "Not loaded"
-    )
+    a.metric("Selected point", "Global")
     b.metric("Climate records", f"{overview_climate_count} months" if screening_calculated else "Not loaded")
     c.metric("Scored crops", str(valid_scores) if screening_calculated else "Not calculated")
     d.metric(
@@ -1284,6 +1289,16 @@ elif page == "Crop Suitability":
         for c in ["Temperature fit", "Annual rainfall fit", "Soil pH fit", "Soil texture fit", "Preliminary score"]:
             display[c] = display[c].map(lambda x: "Not available" if pd.isna(x) else fmt(x))
         st.dataframe(display, hide_index=True, use_container_width=True)
+        if "Soil pH fit" in view.columns:
+            zero_ph_rows = view[
+                pd.to_numeric(view["Soil pH fit"], errors="coerce").eq(0)
+            ]
+            if not zero_ph_rows.empty:
+                names = ", ".join(zero_ph_rows["Crop"].astype(str).tolist())
+                st.warning(
+                    f"Soil pH fit is 0 for: {names}. A zero here means the measured pH is "
+                    "outside that crop's ECOCROP absolute pH range; it does not mean the API returned zero."
+                )
         soil_is_current_for_crop = (
             st.session_state.selected_soil is not None
             and st.session_state.soil_location == (
@@ -1291,24 +1306,34 @@ elif page == "Crop Suitability":
             )
         )
         if soil_is_current_for_crop:
-            st.info(
-                "SoilGrids pH and texture are included where valid for this coordinate. "
-                "Texture compatibility uses broad ECOCROP light/medium/heavy categories."
-            )
+            current_soil = st.session_state.selected_soil or {}
+            has_ph = current_soil.get("phh2o") is not None
+            has_texture = bool(current_soil.get("texture_complete"))
+            if has_ph and has_texture:
+                st.success(
+                    "SoilGrids pH and complete texture fractions are available for this exact point "
+                    "and are included where the crop has corresponding ECOCROP requirements."
+                )
+            elif has_ph:
+                st.warning(
+                    f"SoilGrids pH ({fmt(current_soil.get('phh2o'))}) is included, but complete "
+                    "sand/silt/clay data are unavailable. Results are partial-soil screening; "
+                    "texture has not been imputed."
+                )
+            elif has_texture:
+                st.warning(
+                    "Complete SoilGrids texture is included, but pH is unavailable. "
+                    "Results are partial-soil screening."
+                )
+            else:
+                st.warning(
+                    "SoilGrids returned no complete soil component for this point. "
+                    "Scores use climate data only; missing soil values are not treated as zero."
+                )
         else:
             st.warning(
                 "These are climate-only preliminary screening scores. "
-                "Load SoilGrids data for this same coordinate in Soil Analysis to include soil pH."
-            )
-        scored_ids = set(view["crop_id"].astype(str))
-        catalog_ids = set(catalog["crop_id"].astype(str)) if not catalog.empty else set()
-        unscored_ids = sorted(catalog_ids - scored_ids)
-        if unscored_ids:
-            unscored_names = catalog[catalog["crop_id"].astype(str).isin(unscored_ids)]["crop_name_en"].tolist()
-            st.info(
-                "Not scored because crop-specific ECOCROP climate records are unavailable: "
-                + ", ".join(unscored_names)
-                + ". Missing requirements are not replaced with invented values."
+                "Load SoilGrids data for this same coordinate to include available soil data."
             )
         st.caption(
             "Scores are preliminary screening indicators, not yield predictions or agronomic prescriptions. "
@@ -1387,7 +1412,7 @@ elif page == "Data Sources":
         "Review the datasets behind SmartCrop and understand the limits of each analysis.",
     )
     sources = [
-        ("NASA POWER", "Climate data", "Monthly climate observations used to derive 1991–2020 temperature, precipitation, and solar-radiation normals.", "https://power.larc.nasa.gov/"),
+        ("NASA POWER", "Climate data", "Daily meteorological and solar-energy parameters.", "https://power.larc.nasa.gov/"),
         ("ISRIC SoilGrids", "Soil data", "Gridded global predictions of selected soil properties.", "https://www.isric.org/explore/soilgrids"),
         ("FAO", "Agricultural references", "General references for crop water requirements and rooting depths.", "https://www.fao.org/"),
         ("FAO ECOCROP", "Crop requirements", "Crop ecological requirement reference database.", "https://ecocrop.apps.fao.org/"),
@@ -1409,7 +1434,7 @@ elif page == "Data Sources":
         "For a selected location, the preliminary score combines available temperature (30%), annual rainfall (25%), soil pH (20%), and soil texture (25%) fits; missing components are excluded and weights are renormalized. Temperature is a day-weighted annual mean of monthly normals. Texture is classified approximately using the USDA textural triangle and mapped to broad ECOCROP light/medium/heavy descriptors; it is not a laboratory soil classification.",
         "Root-zone water storage is estimated using generalized rooting-depth references and SoilGrids layer values.",
         "Root-zone storage is not plant water uptake at a particular date and is not an irrigation prescription.",
-        "The rotation generator uses only crops passing the current screening eligibility and requires three distinct crop groups in each three-year sequence. Perennial crops such as olive are excluded. Only crops with available ECOCROP requirement records can enter screening; missing crop records are not invented. It does not model field history, planting calendars, pests, diseases, nutrient balances, soil carbon, irrigation, or economics.",
+        "The rotation generator uses only crops passing the current screening eligibility and requires three distinct crop groups in each three-year sequence. Perennial crops such as olive are excluded. It does not model field history, planting calendars, pests, diseases, nutrient balances, soil carbon, irrigation, or economics.",
         "Missing crop requirement data remain missing; they are not converted to zero.",
     ]
     for item in limitations:
