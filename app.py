@@ -855,7 +855,11 @@ if page == "Overview":
         if overview_score_col and not overview_scores.empty else 0
     )
     a, b, c, d = st.columns(4)
-    a.metric("Selected point", "Global")
+    a.metric(
+        "Selected point",
+        f"{st.session_state.selected_lat:.2f}, {st.session_state.selected_lon:.2f}"
+        if screening_calculated else "Not loaded"
+    )
     b.metric("Climate records", f"{overview_climate_count} months" if screening_calculated else "Not loaded")
     c.metric("Scored crops", str(valid_scores) if screening_calculated else "Not calculated")
     d.metric(
@@ -1296,6 +1300,16 @@ elif page == "Crop Suitability":
                 "These are climate-only preliminary screening scores. "
                 "Load SoilGrids data for this same coordinate in Soil Analysis to include soil pH."
             )
+        scored_ids = set(view["crop_id"].astype(str))
+        catalog_ids = set(catalog["crop_id"].astype(str)) if not catalog.empty else set()
+        unscored_ids = sorted(catalog_ids - scored_ids)
+        if unscored_ids:
+            unscored_names = catalog[catalog["crop_id"].astype(str).isin(unscored_ids)]["crop_name_en"].tolist()
+            st.info(
+                "Not scored because crop-specific ECOCROP climate records are unavailable: "
+                + ", ".join(unscored_names)
+                + ". Missing requirements are not replaced with invented values."
+            )
         st.caption(
             "Scores are preliminary screening indicators, not yield predictions or agronomic prescriptions. "
             "Weights when available: temperature 30%, annual rainfall 25%, soil pH 20%, and soil texture 25%; "
@@ -1373,7 +1387,7 @@ elif page == "Data Sources":
         "Review the datasets behind SmartCrop and understand the limits of each analysis.",
     )
     sources = [
-        ("NASA POWER", "Climate data", "Daily meteorological and solar-energy parameters.", "https://power.larc.nasa.gov/"),
+        ("NASA POWER", "Climate data", "Monthly climate observations used to derive 1991–2020 temperature, precipitation, and solar-radiation normals.", "https://power.larc.nasa.gov/"),
         ("ISRIC SoilGrids", "Soil data", "Gridded global predictions of selected soil properties.", "https://www.isric.org/explore/soilgrids"),
         ("FAO", "Agricultural references", "General references for crop water requirements and rooting depths.", "https://www.fao.org/"),
         ("FAO ECOCROP", "Crop requirements", "Crop ecological requirement reference database.", "https://ecocrop.apps.fao.org/"),
@@ -1395,7 +1409,7 @@ elif page == "Data Sources":
         "For a selected location, the preliminary score combines available temperature (30%), annual rainfall (25%), soil pH (20%), and soil texture (25%) fits; missing components are excluded and weights are renormalized. Temperature is a day-weighted annual mean of monthly normals. Texture is classified approximately using the USDA textural triangle and mapped to broad ECOCROP light/medium/heavy descriptors; it is not a laboratory soil classification.",
         "Root-zone water storage is estimated using generalized rooting-depth references and SoilGrids layer values.",
         "Root-zone storage is not plant water uptake at a particular date and is not an irrigation prescription.",
-        "The rotation generator uses only crops passing the current screening eligibility and requires three distinct crop groups in each three-year sequence. Perennial crops such as olive are excluded. It does not model field history, planting calendars, pests, diseases, nutrient balances, soil carbon, irrigation, or economics.",
+        "The rotation generator uses only crops passing the current screening eligibility and requires three distinct crop groups in each three-year sequence. Perennial crops such as olive are excluded. Only crops with available ECOCROP requirement records can enter screening; missing crop records are not invented. It does not model field history, planting calendars, pests, diseases, nutrient balances, soil carbon, irrigation, or economics.",
         "Missing crop requirement data remain missing; they are not converted to zero.",
     ]
     for item in limitations:
