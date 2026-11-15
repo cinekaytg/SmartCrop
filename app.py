@@ -197,7 +197,7 @@ def fetch_nasa_power_climate_normals(latitude, longitude, start_year=1991, end_y
 
 @st.cache_data(ttl=21600, show_spinner=False)
 def fetch_soilgrids_point(latitude, longitude):
-    """Fetch 0–5 cm SoilGrids mean estimates via WCS.
+    """Fetch 0–5 cm SoilGrids mean estimates via WCS, with bounded retries for transient service timeouts.
 
     WCS responses are validated by opening the raster itself, not by relying
     on the HTTP Content-Type or a narrow TIFF magic-byte check. The server may
@@ -234,6 +234,8 @@ def fetch_soilgrids_point(latitude, longitude):
     rasters, failures, distances = {}, {}, {}
 
     def get_raster(prop):
+        """Fetch one WCS layer with bounded retries for transient ISRIC timeouts."""
+        import time
         endpoint = f"https://maps.isric.org/mapserv?map=/map/{prop}.map"
         params = [
             ("SERVICE", "WCS"), ("VERSION", "2.0.1"),
@@ -242,50 +244,61 @@ def fetch_soilgrids_point(latitude, longitude):
             ("SUBSETTINGCRS", crs_uri), ("OUTPUTCRS", crs_uri),
             ("RESX", "250"), ("RESY", "250"),
         ]
-        response = requests.get(
-            endpoint,
-            params=params,
-            headers={"User-Agent": "SmartCrop/1.2 (SoilGrids WCS client)"},
-            timeout=(10, 60),
-        )
-        response.raise_for_status()
-        content = response.content
-        if not content:
-            raise RuntimeError("SoilGrids returned an empty response.")
+        last_error = None
+        # ISRIC occasionally stalls on individual WCS layers. Retry only transient
+        # failures; never replace missing measurements with fabricated values.
+        for attempt in range(3):
+            try:
+                response = requests.get(
+                    endpoint,
+                    params=params,
+                    headers={
+                        "User-Agent": "SmartCrop/1.3 (educational research client)",
+                        "Accept": "image/tiff, image/*;q=0.9, */*;q=0.8",
+                    },
+                    timeout=(15, 100),
+                )
+                response.raise_for_status()
+                content = response.content
+                if not content:
+                    raise RuntimeError("SoilGrids returned an empty response.")
 
-        # Do not reject by Content-Type or TIFF signature: valid TIFF/GeoTIFF
-        # payloads can be labelled image/tiff and may use different TIFF variants.
-        try:
-            with rasterio.io.MemoryFile(content) as memfile:
-                with memfile.open() as ds:
-                    if ds.driver not in ("GTiff", "COG"):
-                        raise RuntimeError(
-                            f"Unsupported raster driver returned by WCS: {ds.driver}"
-                        )
-                    if ds.count < 1 or ds.width < 1 or ds.height < 1:
-                        raise RuntimeError("WCS returned an empty raster.")
-                    arr = ds.read(1, masked=True)
-                    values = np.asarray(arr.filled(np.nan), dtype=float)
-                    valid = np.isfinite(values) & (ds.read_masks(1) > 0)
-                    if ds.nodata is not None:
-                        valid &= values != float(ds.nodata)
-                    if prop == "phh2o":
-                        valid &= (values >= 30) & (values <= 110)
-                    else:
-                        # Zero is a valid fraction; only NoData and out-of-range values are rejected.
-                        valid &= (values >= 0) & (values <= 1000)
-                    return values.copy(), valid.copy(), ds.transform, ds.crs
-        except Exception as exc:
-            content_type = response.headers.get("Content-Type", "unknown")
-            preview = content[:120].hex(" ")
-            raise RuntimeError(
-                f"Could not open WCS response as a GeoTIFF (HTTP {response.status_code}, "
-                f"Content-Type: {content_type}, bytes: {preview}): {exc}"
-            ) from exc
+                # Do not reject by Content-Type: valid GeoTIFFs may be labelled image/tiff.
+                try:
+                    with rasterio.io.MemoryFile(content) as memfile:
+                        with memfile.open() as ds:
+                            if ds.driver not in ("GTiff", "COG"):
+                                raise RuntimeError(
+                                    f"Unsupported raster driver returned by WCS: {ds.driver}"
+                                )
+                            if ds.count < 1 or ds.width < 1 or ds.height < 1:
+                                raise RuntimeError("WCS returned an empty raster.")
+                            arr = ds.read(1, masked=True)
+                            values = np.asarray(arr.filled(np.nan), dtype=float)
+                            valid = np.isfinite(values) & (ds.read_masks(1) > 0)
+                            if ds.nodata is not None:
+                                valid &= values != float(ds.nodata)
+                            if prop == "phh2o":
+                                valid &= (values >= 30) & (values <= 110)
+                            else:
+                                valid &= (values >= 0) & (values <= 1000)
+                            return values.copy(), valid.copy(), ds.transform, ds.crs
+                except Exception as exc:
+                    content_type = response.headers.get("Content-Type", "unknown")
+                    raise RuntimeError(
+                        f"Could not open WCS response as GeoTIFF (HTTP {response.status_code}, "
+                        f"Content-Type: {content_type}): {exc}"
+                    ) from exc
+            except Exception as exc:
+                last_error = exc
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+        raise RuntimeError(f"{type(last_error).__name__}: {last_error}")
 
-    # Parallel requests keep the overall wait bounded by the slowest layer.
+    # Limit concurrency to avoid overwhelming the public WCS service; each layer
+    # has independent retries so one failed property does not discard other layers.
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    with ThreadPoolExecutor(max_workers=2) as executor:
         future_to_prop = {executor.submit(get_raster, prop): prop for prop in properties}
         for future in as_completed(future_to_prop):
             prop = future_to_prop[future]
