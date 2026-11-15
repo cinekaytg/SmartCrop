@@ -655,7 +655,11 @@ def build_location_suitability(climate_df, ecological, catalog, soil_ph=None, so
             sum(value * weight for value, weight in weighted_parts) / weight_total
             if weight_total else None
         )
-        score = 0.0 if outside_absolute_limit else weighted_score
+        # Keep the weighted screening score visible even when a crop crosses
+        # an absolute threshold. The threshold is represented separately in
+        # Eligibility and rotation filtering, rather than erasing all other
+        # useful component information by forcing the composite score to 0.
+        score = weighted_score
 
         cat = catalog[catalog["crop_id"] == crop["crop_id"]]
         crop_name = cat.iloc[0]["crop_name_en"] if not cat.empty else str(crop["crop_id"]).title()
@@ -854,7 +858,11 @@ if page == "Overview":
     a.metric("Selected point", "Global")
     b.metric("Climate records", f"{overview_climate_count} months" if screening_calculated else "Not loaded")
     c.metric("Scored crops", str(valid_scores) if screening_calculated else "Not calculated")
-    d.metric("Rotation candidates", str(overview_rotation_count) if screening_calculated else "Not calculated")
+    d.metric(
+        "Rotation candidates",
+        (str(overview_rotation_count) if overview_rotation_count > 0 else "None eligible")
+        if screening_calculated else "Not calculated",
+    )
 
     left, right = st.columns([1.12, 1])
     with left:
@@ -968,13 +976,21 @@ if page == "Overview":
                 "to refresh this table"
             )
         if screening_calculated and overview_score_col and overview_name_col and not overview_scores.empty:
-            view = overview_scores[[overview_name_col, overview_score_col]].copy()
+            overview_columns = [overview_name_col, overview_score_col]
+            if "Eligibility" in overview_scores.columns:
+                overview_columns.append("Eligibility")
+            view = overview_scores[overview_columns].copy()
             view[overview_score_col] = pd.to_numeric(view[overview_score_col], errors="coerce")
-            view = view.dropna().sort_values(overview_score_col, ascending=False)
+            view = view.dropna(subset=[overview_score_col]).sort_values(overview_score_col, ascending=False)
             view[overview_name_col] = view[overview_name_col].map(pretty_crop)
-            view.columns = ["Crop", "Preliminary score"]
+            rename_map = {overview_name_col: "Crop", overview_score_col: "Preliminary score"}
+            view = view.rename(columns=rename_map)
             view["Preliminary score"] = view["Preliminary score"].map(lambda x: fmt(x))
             st.dataframe(view, hide_index=True, use_container_width=True)
+            if "Eligibility" in view.columns and view["Eligibility"].eq("Outside absolute limits").any():
+                st.warning("Some crops cross at least one ECOCROP absolute climate/soil limit. Their weighted screening scores remain visible for transparency, but they are excluded from rotation candidates.")
+            if overview_rotation_count == 0:
+                st.info("No three-crop rotation currently meets the screening eligibility and crop-group diversity rules for this point.")
         else:
             st.info(
                 "Crop scores have not been calculated for this point yet. "
