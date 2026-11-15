@@ -827,6 +827,12 @@ if "selected_soil" not in st.session_state:
     st.session_state.selected_soil = None
 if "soil_location" not in st.session_state:
     st.session_state.soil_location = None
+if "location_load_pending" not in st.session_state:
+    st.session_state.location_load_pending = False
+if "climate_load_error" not in st.session_state:
+    st.session_state.climate_load_error = None
+if "soil_load_error" not in st.session_state:
+    st.session_state.soil_load_error = None
 
 with st.sidebar:
     st.markdown("# 🌱 SmartCrop")
@@ -847,7 +853,7 @@ with st.sidebar:
     st.divider()
     st.caption("SELECTED GLOBAL LOCATION")
     st.markdown(f"**{st.session_state.selected_lat:.4f}, {st.session_state.selected_lon:.4f}**")
-    st.caption("NASA POWER climate data can be requested for the selected point.")
+    st.caption("Select a point on the map to automatically load available data.")
 
 climate = data("climate_monthly")
 soil = data("soil_site_summary")
@@ -907,7 +913,7 @@ if page == "Overview":
     left, right = st.columns([1.12, 1])
     with left:
         section("Select any location worldwide")
-        st.caption("Click anywhere on the map to choose a point. Then load its NASA POWER climate data.")
+        st.caption("Step 1: Click anywhere on the map. SmartCrop will automatically load available NASA POWER climate and SoilGrids data for that point.")
         map_view = folium.Map(
             location=[st.session_state.selected_lat, st.session_state.selected_lon],
             zoom_start=2 if st.session_state.climate_location is None else 5,
@@ -957,51 +963,98 @@ if page == "Overview":
                 st.session_state.location_soil_ph = None
                 st.session_state.selected_soil = None
                 st.session_state.soil_location = None
+                st.session_state.climate_load_error = None
+                st.session_state.soil_load_error = None
+                st.session_state.location_load_pending = True
                 st.rerun()
 
         st.write(
             f"**Selected coordinates:** {st.session_state.selected_lat:.4f}, "
             f"{st.session_state.selected_lon:.4f}"
         )
-        if st.button("Load climate data for this location", type="primary", use_container_width=True):
-            try:
-                with st.spinner(
-                    "Requesting 30 years of NASA POWER monthly climate data (1991–2020)..."
-                ):
+        # Automatically fetch both data sources after a new map point is selected.
+        # Users do not need to discover or press a separate red load button.
+        if st.session_state.location_load_pending:
+            st.session_state.location_load_pending = False
+            selected_point = (
+                st.session_state.selected_lat, st.session_state.selected_lon
+            )
+            with st.spinner(
+                "Loading climate and soil data for your selected location..."
+            ):
+                try:
                     climate_package = fetch_nasa_power_climate_normals(
-                        st.session_state.selected_lat,
-                        st.session_state.selected_lon,
-                        1991,
-                        2020,
+                        selected_point[0], selected_point[1], 1991, 2020
                     )
-                result = climate_package["monthly_normals"]
-                st.session_state.selected_climate = result
-                st.session_state.selected_climate_history = climate_package["monthly_history"]
-                st.session_state.selected_annual_climate = climate_package["annual_summary"]
-                st.session_state.climate_period = climate_package["period"]
-                st.session_state.climate_location = (
-                    st.session_state.selected_lat, st.session_state.selected_lon
+                    st.session_state.selected_climate = climate_package["monthly_normals"]
+                    st.session_state.selected_climate_history = climate_package["monthly_history"]
+                    st.session_state.selected_annual_climate = climate_package["annual_summary"]
+                    st.session_state.climate_period = climate_package["period"]
+                    st.session_state.climate_location = selected_point
+                    st.session_state.climate_load_error = None
+                except Exception as exc:
+                    st.session_state.selected_climate = pd.DataFrame()
+                    st.session_state.selected_climate_history = pd.DataFrame()
+                    st.session_state.selected_annual_climate = pd.DataFrame()
+                    st.session_state.climate_location = None
+                    st.session_state.climate_load_error = str(exc)
+
+                try:
+                    soil_result = fetch_soilgrids_point(*selected_point)
+                    st.session_state.selected_soil = soil_result
+                    st.session_state.soil_location = selected_point
+                    st.session_state.soil_load_error = None
+                except Exception as exc:
+                    st.session_state.selected_soil = None
+                    st.session_state.soil_location = None
+                    st.session_state.soil_load_error = str(exc)
+
+            climate_is_current = (
+                not st.session_state.selected_climate.empty
+                and st.session_state.climate_location == selected_point
+            )
+            soil_is_current = (
+                st.session_state.selected_soil is not None
+                and st.session_state.soil_location == selected_point
+            )
+            if climate_is_current:
+                soil_result = st.session_state.selected_soil if soil_is_current else None
+                st.session_state.location_soil_ph = (
+                    soil_result.get("phh2o") if soil_result else None
                 )
-                # Never reuse soil values from a different coordinate. SoilGrids WCS
-                # is queried separately on the Soil Analysis page.
-                matching_soil = (
-                    st.session_state.selected_soil
-                    if st.session_state.soil_location == (
-                        st.session_state.selected_lat, st.session_state.selected_lon
-                    ) else None
-                )
-                selected_ph = matching_soil.get("phh2o") if matching_soil else None
-                st.session_state.location_soil_ph = selected_ph
                 st.session_state.location_suitability = build_location_suitability(
-                    result, ecological, catalog, soil_ph=selected_ph,
-                    soil_texture=matching_soil
+                    st.session_state.selected_climate,
+                    ecological,
+                    catalog,
+                    soil_ph=st.session_state.location_soil_ph,
+                    soil_texture=soil_result,
                 )
                 st.session_state.location_rotations = build_location_rotations(
                     st.session_state.location_suitability
                 )
-                st.success("NASA POWER 30-year climate reference data loaded. Crop screening and rotation scenarios were recalculated using the 1991–2020 climate baseline and available ECOCROP requirements.")
-            except Exception as exc:
-                st.error(f"NASA POWER data could not be loaded: {exc}")
+            else:
+                st.session_state.location_suitability = pd.DataFrame()
+                st.session_state.location_rotations = pd.DataFrame()
+            st.rerun()
+
+        if st.session_state.climate_load_error:
+            st.warning(
+                "NASA POWER climate data are unavailable for this point. "
+                "Crop scores and climate charts cannot be calculated until valid climate data are returned. "
+                f"Details: {st.session_state.climate_load_error}"
+            )
+        if st.session_state.soil_load_error:
+            st.warning(
+                "SoilGrids data are unavailable or incomplete for this point. "
+                "The app will continue with the soil properties that are actually available; "
+                "missing values are not treated as zero. "
+                f"Details: {st.session_state.soil_load_error}"
+            )
+        if st.session_state.climate_load_error or st.session_state.soil_load_error:
+            if st.button("Retry unavailable data", use_container_width=True):
+                st.session_state.location_load_pending = True
+                st.rerun()
+
         st.caption("Global point selection is enabled. Climate screening uses a 1991–2020 NASA POWER reference period; SoilGrids data are retrieved separately for the selected point.")
     with right:
         section("Preliminary crop screening")
@@ -1033,12 +1086,11 @@ if page == "Overview":
                 st.info("No three-crop rotation currently meets the screening eligibility and crop-group diversity rules for this point.")
         else:
             st.info(
-                "Crop scores have not been calculated for this point yet. "
-                "Load NASA POWER climate data for the selected coordinates to calculate crop suitability and rotation candidates."
+                "Select a point on the map to start. SmartCrop will automatically retrieve available climate and soil data, then calculate crop screening and rotation scenarios."
             )
     st.info(
-        "Climate data can be requested for a selected global point and use a 1991–2020, 30-year reference period. "
-        "The reference period is a historical climate baseline, not a forecast. NASA POWER grid resolution varies by parameter; SoilGrids data are retrieved separately for the selected point."
+        "After you select a map point, SmartCrop automatically requests NASA POWER climate normals (1991–2020) and SoilGrids topsoil estimates. "
+        "If a source has no valid data or times out, the app displays a warning and does not invent missing values. The climate baseline is historical, not a forecast."
     )
 
 elif page == "Climate Analysis":
@@ -1062,13 +1114,19 @@ elif page == "Climate Analysis":
     else:
         climate_to_show = pd.DataFrame()
         annual_history = pd.DataFrame()
-        st.info(
-            "No long-term climate reference has been loaded for the selected point yet. "
-            "Go to Overview, select a point on the map, and load its NASA POWER climate data."
-        )
+        if st.session_state.climate_load_error:
+            st.warning(
+                "NASA POWER did not return usable climate data for this coordinate. "
+                "The climate charts and crop scores are unavailable until a valid response is received. "
+                f"Details: {st.session_state.climate_load_error}"
+            )
+        else:
+            st.info(
+                "Select a point on the Overview map. NASA POWER climate data will be requested automatically."
+            )
 
     if climate_to_show.empty:
-        st.warning("Long-term climate reference data are not available for this selected point.")
+        st.warning("No valid long-term climate reference is currently available for this selected point.")
     else:
         month = "month"
         df = climate_to_show.copy()
@@ -1158,53 +1216,17 @@ elif page == "Soil Analysis":
         "at the selected map coordinate."
     )
 
-    if st.button(
-        "Load SoilGrids data for this location",
-        type="primary",
-        use_container_width=True,
-    ):
-        try:
-            with st.spinner(
-                "Requesting pH, sand, silt, and clay estimates from ISRIC SoilGrids..."
-            ):
-                soil_result = fetch_soilgrids_point(*selected_point)
-            st.session_state.selected_soil = soil_result
-            st.session_state.soil_location = selected_point
-            st.session_state.location_soil_ph = soil_result.get("phh2o")
-
-            climate_is_current = (
-                not st.session_state.selected_climate.empty
-                and st.session_state.climate_location == selected_point
-            )
-            if climate_is_current:
-                st.session_state.location_suitability = build_location_suitability(
-                    st.session_state.selected_climate,
-                    ecological,
-                    catalog,
-                    soil_ph=soil_result.get("phh2o"),
-                    soil_texture=soil_result,
-                )
-                st.session_state.location_rotations = build_location_rotations(
-                    st.session_state.location_suitability
-                )
-            if soil_result.get("phh2o") is None:
-                st.warning(
-                    "SoilGrids returned texture data but no valid pH estimate for this coordinate. "
-                    "Crop screening continues without the pH component."
-                )
-            elif soil_result.get("property_errors"):
-                st.warning(
-                    "Some SoilGrids properties were unavailable. Available properties are shown; "
-                    "missing values are not imputed."
-                )
-            else:
-                st.success(
-                    "SoilGrids data loaded. Soil pH was added to crop screening "
-                    "where climate data are available."
-                )
-            st.rerun()
-        except Exception as exc:
-            st.error(f"SoilGrids data could not be loaded: {exc}")
+    if st.session_state.soil_load_error and not soil_is_current:
+        st.warning(
+            "SoilGrids data could not be loaded for this coordinate. "
+            "Climate analysis can still be used if NASA POWER data are available. "
+            "Return to Overview and use 'Retry unavailable data' to try again. "
+            f"Details: {st.session_state.soil_load_error}"
+        )
+    elif not soil_is_current:
+        st.info(
+            "Select a point on the Overview map. SoilGrids data will be requested automatically."
+        )
 
     if soil_is_current:
         soil_values = st.session_state.selected_soil
