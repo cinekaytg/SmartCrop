@@ -1,3 +1,4 @@
+import html
 import sqlite3
 import itertools
 import math
@@ -16,7 +17,7 @@ st.set_page_config(
     page_title="SmartCrop | Field Intelligence",
     page_icon="🌱",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 APP_DIR = Path(__file__).resolve().parent
@@ -388,9 +389,197 @@ st.markdown("""
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap');
 html, body, [class*="css"] {font-family:'DM Sans',sans-serif;}
 .stApp {background:#f4f7f3;color:#20352b;}
-[data-testid="stSidebar"] {background:#10382d;}
-[data-testid="stSidebar"] * {color:#f4f8f4 !important;}
-[data-testid="stSidebar"] [data-testid="stRadio"] label {font-weight:500;}
+[data-testid="stSidebar"],
+[data-testid="stSidebarCollapsedControl"],
+[data-testid="collapsedControl"],
+[data-testid="stSidebarCollapseButton"],
+[data-testid="stExpandSidebarButton"],
+[data-testid="stHeader"],
+[data-testid="stToolbar"],
+[data-testid="stDecoration"] {display:none !important;}
+[data-testid="stMainBlockContainer"] {padding-top:184px !important;}
+.st-key-topnav {
+  background:#10382d;
+  position:fixed;
+  top:0;
+  left:0;
+  width:100vw;
+  max-width:100vw;
+  margin:0;
+  border-radius:0;
+  box-sizing:border-box;
+  padding:0 32px;
+  height:168px;
+  min-height:168px;
+  z-index:1000001;
+  overflow:visible;
+  display:flex;
+  align-items:center;
+}
+.st-key-topnav [data-testid="stVerticalBlock"],
+.st-key-topnav [data-testid="stHorizontalBlock"],
+.st-key-topnav [data-testid="stElementContainer"],
+.st-key-topnav [data-testid="stColumn"] {overflow:visible !important;}
+.st-key-topnav [data-testid="stVerticalBlock"] {
+  width:100%;
+  justify-content:center !important;
+}
+.st-key-topnav [data-testid="stHorizontalBlock"] {
+  align-items:center !important;
+  width:100%;
+}
+.st-key-topnav [data-testid="stColumn"] {
+  display:flex !important;
+  align-items:center !important;
+}
+.st-key-topnav [data-testid="stColumn"] [data-testid="stVerticalBlock"] {
+  justify-content:center !important;
+}
+.st-key-topnav [data-testid="stHorizontalBlock"],
+.st-key-topnav [data-testid="stColumn"] {
+  height:168px !important;
+  min-height:168px !important;
+  align-items:center !important;
+}
+.st-key-topnav [data-testid="stColumn"]:nth-child(2),
+.st-key-topnav [data-testid="stColumn"]:nth-child(2) [data-testid="stVerticalBlock"],
+.st-key-topnav [data-testid="stColumn"]:nth-child(2) [data-testid="stElementContainer"],
+.st-key-topnav [data-testid="stRadio"],
+.st-key-topnav [data-testid="stRadio"] > div,
+.st-key-topnav [role="radiogroup"] {
+  height:168px !important;
+  min-height:168px !important;
+  width:100% !important;
+  max-width:100% !important;
+  align-items:stretch !important;
+}
+.st-key-topnav [data-testid="stRadio"] > div[role="radiogroup"] {
+  display:flex !important;
+  justify-content:space-between !important;
+  align-items:center !important;
+  gap:8px;
+}
+.st-key-topnav [data-testid="stWidgetLabel"] {display:none !important;min-height:0 !important;padding:0 !important;margin:0 !important;}
+.st-key-topnav label[data-baseweb="radio"] > div:first-child,
+.st-key-topnav label[data-baseweb="radio"] input {
+  display:none !important;
+  width:0 !important;
+  height:0 !important;
+  margin:0 !important;
+  padding:0 !important;
+}
+.st-key-topnav [data-testid="stRadio"] [role="radiogroup"] label,
+.st-key-topnav [data-testid="stRadio"] [role="radiogroup"] label p,
+.st-key-topnav [data-testid="stRadio"] [role="radiogroup"] label span {color:#f4f8f4 !important;font-weight:600;line-height:1.35 !important;}
+.st-key-topnav [data-testid="stRadio"] [role="radiogroup"] label {
+  height:52px !important;
+  min-height:52px !important;
+  margin:0 !important;
+  padding:0 14px !important;
+  border-radius:12px !important;
+  display:flex !important;
+  align-items:center !important;
+  justify-content:center !important;
+  white-space:nowrap;
+  background:transparent;
+  cursor:pointer;
+}
+.st-key-topnav [data-testid="stRadio"] label:hover,
+.st-key-topnav [data-testid="stRadio"] label:has(input:checked) {background:#f4f8f4;}
+.st-key-topnav [data-testid="stRadio"] label:hover p,
+.st-key-topnav [data-testid="stRadio"] label:hover span,
+.st-key-topnav [data-testid="stRadio"] label:has(input:checked) p,
+.st-key-topnav [data-testid="stRadio"] label:has(input:checked) span {color:#10382d !important;background:transparent !important;}
+.st-key-open_location button {
+  background:rgba(255,255,255,.08);
+  color:#f4f8f4;
+  border:1px solid rgba(255,255,255,.22);
+  border-radius:14px;
+  min-height:68px;
+  white-space:normal;
+  line-height:1.3;
+  text-align:left;
+  padding:8px 12px;
+}
+.st-key-open_location button p {color:#f4f8f4 !important;font-weight:700;}
+.st-key-rail_soil, .st-key-rail_climate {
+  position:fixed;
+  top:168px;
+  bottom:0;
+  width:72px;
+  z-index:1000000;
+}
+.st-key-rail_soil {right:0;}
+.st-key-rail_climate {left:0;}
+.st-key-rail_soil button, .st-key-rail_climate button {
+  width:72px;
+  height:calc(100vh - 168px);
+  min-height:calc(100vh - 168px);
+  background:#10382d;
+  color:#f4f8f4;
+  border:0;
+  border-radius:0;
+  font-weight:700;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  overflow:visible !important;
+  position:relative;
+}
+.st-key-rail_soil button [data-testid="stMarkdownContainer"],
+.st-key-rail_climate button [data-testid="stMarkdownContainer"] {
+  position:relative;
+  width:max-content !important;
+  max-width:none !important;
+  overflow:visible !important;
+  transform:rotate(90deg);
+  transform-origin:center center;
+}
+.st-key-rail_climate button [data-testid="stMarkdownContainer"]::after,
+.st-key-rail_soil button [data-testid="stMarkdownContainer"]::after {
+  position:absolute;
+  left:calc(100% + 12px);
+  top:50%;
+  transform:translateY(-50%) rotate(-90deg);
+  font-size:22px;
+  line-height:1;
+  color:#f4f8f4;
+  pointer-events:none;
+}
+.st-key-rail_climate button [data-testid="stMarkdownContainer"]::after {content:"←";}
+.st-key-rail_soil button [data-testid="stMarkdownContainer"]::after {content:"→";}
+.st-key-rail_climate button:hover [data-testid="stMarkdownContainer"]::after,
+.st-key-rail_soil button:hover [data-testid="stMarkdownContainer"]::after,
+.st-key-rail_climate button:focus [data-testid="stMarkdownContainer"]::after,
+.st-key-rail_soil button:focus [data-testid="stMarkdownContainer"]::after {color:#10382d;}
+.st-key-rail_soil button p, .st-key-rail_climate button p {
+  color:#f4f8f4 !important;
+  writing-mode:horizontal-tb !important;
+  text-orientation:mixed !important;
+  white-space:nowrap !important;
+  width:max-content !important;
+  max-width:none !important;
+  height:auto !important;
+  margin:0 !important;
+  line-height:1;
+  text-align:center;
+  letter-spacing:.4px;
+  font-size:16px;
+  font-weight:700;
+}
+.st-key-rail_soil button:hover p,
+.st-key-rail_climate button:hover p,
+.st-key-rail_soil button:focus p,
+.st-key-rail_climate button:focus p,
+.st-key-rail_soil button:hover div,
+.st-key-rail_climate button:hover div,
+.st-key-rail_soil button:focus div,
+.st-key-rail_climate button:focus div {
+  color:#10382d !important;
+}
+.brand {display:flex;align-items:center;gap:8px;color:#f4f8f4;padding-top:0;}
+.brand strong {font-family:Manrope,sans-serif;font-size:1.15rem;display:block;line-height:1.1;}
+.brand small {color:#b7d7c4;font-size:.72rem;letter-spacing:.4px;}
 .hero {background:linear-gradient(120deg,#10382d,#28734f);padding:30px 34px;border-radius:18px;color:white;margin-bottom:22px;}
 .hero h1 {color:white;font-family:Manrope,sans-serif;font-size:2.15rem;margin:5px 0 8px;font-weight:800;}
 .hero p {color:#e0eee5;margin:0;font-size:1rem;}
@@ -407,8 +596,661 @@ div[data-testid="stAlert"] {border-radius:12px;}
 .rotation-sequence {font-size:1.08rem;font-weight:700;color:#183d2d;}
 .rotation-groups {font-size:.86rem;color:#68796f;margin-top:7px;}
 .footer {color:#718177;font-size:.82rem;text-align:center;padding:14px 0 4px;}
+.facts {display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:8px 0 18px;}
+.fact {background:#fff;border:1px solid #e0e9e1;border-radius:14px;padding:12px 14px;}
+.fact span {display:block;color:#52665b;font-size:.78rem;font-weight:600;}
+.fact strong {display:block;color:#173f2e;font-size:1rem;margin-top:3px;}
+[data-testid="stCustomComponentV1"] {position:relative;z-index:0;}
+div[data-baseweb="popover"], div[data-baseweb="menu"] {z-index:1000002 !important;}
+.location-chip {background:rgba(255,255,255,.08);color:#f4f8f4;border-radius:14px;padding:4px 12px 6px;min-width:160px;}
+.location-chip-kicker {font-size:10px;letter-spacing:1.4px;font-weight:700;color:#b7d7c4;}
+.location-chip-name {font-family:Manrope,sans-serif;font-weight:800;font-size:.88rem;line-height:1.2;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.location-chip-meta {font-size:.72rem;color:#d5e8dc;margin-top:0;}
 </style>
 """, unsafe_allow_html=True)
+
+
+def _http_status(exc):
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", None)
+
+
+def explain_climate_failure(exc):
+    """Separate a NASA coverage gap from a temporary service failure."""
+    status = _http_status(exc)
+    if (
+        isinstance(exc, (requests.Timeout, requests.ConnectionError))
+        or (status is not None and (status >= 500 or status == 429))
+    ):
+        return (
+            "service",
+            "NASA POWER did not respond. This is a temporary service problem, "
+            "not a system error in SmartCrop, and it does not mean this point has no climate record. "
+            "Wait a moment and try again.",
+        )
+    if isinstance(exc, ValueError):
+        return (
+            "unavailable",
+            "NASA POWER has no usable 1991–2020 climate record for this coordinate. "
+            "This is not a system error. NASA did not return enough data for this point. "
+            "Choose another point on land and load the climate record again.",
+        )
+    return (
+        "unexpected",
+        "The climate request failed for an unexpected reason. This point was not scored.",
+    )
+
+
+def explain_soil_failure(exc):
+    """Separate a SoilGrids coverage gap from a temporary service failure."""
+    lowered = str(exc).lower()
+    if "dependencies are missing" in lowered:
+        return (
+            "unavailable",
+            "SoilGrids cannot be read because a required library is missing. "
+            "Climate screening is unaffected.",
+        )
+    status = _http_status(exc)
+    service_tokens = ("timeout", "timed out", "connection", "502", "503", "504", "429")
+    if (
+        isinstance(exc, (requests.Timeout, requests.ConnectionError))
+        or (status is not None and (status >= 500 or status == 429))
+        or any(token in lowered for token in service_tokens)
+    ):
+        return (
+            "service",
+            "ISRIC SoilGrids did not respond. This is a temporary problem with the soil service, "
+            "not a NASA climate gap and not a system error in SmartCrop. "
+            "Try again shortly. Crop screening can continue with climate data alone.",
+        )
+    if isinstance(exc, ValueError):
+        return (
+            "unavailable",
+            "SoilGrids has no usable 0–5 cm estimate for this coordinate. "
+            "This is not a system error. The soil map often has no value over water "
+            "or on some coastal pixels. Choose a nearby point on land.",
+        )
+    return (
+        "unexpected",
+        "The soil request failed for an unexpected reason. Climate screening is unchanged.",
+    )
+
+
+def notice_from(exc, explainer):
+    kind, text = explainer(exc)
+    return {"kind": kind, "text": text, "detail": f"{type(exc).__name__}: {exc}"}
+
+
+def show_remote_notice(notice):
+    if not notice:
+        return
+    if notice.get("kind") == "unexpected":
+        st.error(notice.get("text", ""))
+    else:
+        st.warning(notice.get("text", ""))
+    detail = notice.get("detail")
+    if detail:
+        with st.expander("Technical detail"):
+            st.code(detail)
+
+
+def current_point():
+    return (st.session_state.selected_lat, st.session_state.selected_lon)
+
+
+def climate_is_current():
+    return (
+        st.session_state.location_chosen
+        and not st.session_state.selected_climate.empty
+        and st.session_state.climate_location == current_point()
+    )
+
+
+def soil_is_current():
+    return (
+        st.session_state.location_chosen
+        and st.session_state.selected_soil is not None
+        and st.session_state.soil_location == current_point()
+    )
+
+
+def clear_point_results():
+    st.session_state.selected_climate = pd.DataFrame()
+    st.session_state.selected_climate_history = pd.DataFrame()
+    st.session_state.selected_annual_climate = pd.DataFrame()
+    st.session_state.climate_period = None
+    st.session_state.climate_location = None
+    st.session_state.location_suitability = pd.DataFrame()
+    st.session_state.location_rotations = pd.DataFrame()
+    st.session_state.location_soil_ph = None
+    st.session_state.selected_soil = None
+    st.session_state.soil_location = None
+    st.session_state.climate_notice = None
+    st.session_state.soil_notice = None
+
+
+def render_selected_place():
+    """Place button at the right of the top menu. Opens the location dialog."""
+    if st.session_state.location_chosen:
+        name = st.session_state.location_label or "Map point"
+        meta = f"{st.session_state.selected_lat:.4f}, {st.session_state.selected_lon:.4f}"
+        label = f"{name} · {meta}"
+    else:
+        label = "Choose a place · Country, city, or map"
+    return st.button(label, key="open_location", width="stretch")
+
+
+def render_topnav():
+    """Fixed page menu. The place button on the right reopens location selection."""
+    pages = [
+        "Location",
+        "Climate Analysis",
+        "Soil Analysis",
+        "Crop Suitability",
+        "Crop Rotation",
+        "Data Sources",
+    ]
+    with st.container(key="topnav"):
+        brand, nav, place = st.columns([1.05, 5.4, 2.15], vertical_alignment="center")
+        with brand:
+            st.markdown(
+                '<div class="brand"><span>🌱</span><div>'
+                "<strong>SmartCrop</strong><small>Field intelligence</small></div></div>",
+                unsafe_allow_html=True,
+            )
+        with nav:
+            page = st.radio(
+                "Pages",
+                pages,
+                horizontal=True,
+                label_visibility="collapsed",
+                key="nav_page",
+                format_func=lambda name: {
+                    "Climate Analysis": "Climate",
+                    "Soil Analysis": "Soil",
+                    "Crop Suitability": "Suitability",
+                    "Crop Rotation": "Rotation",
+                    "Data Sources": "Sources",
+                }.get(name, name),
+            )
+        with place:
+            reopen_location = render_selected_place()
+    return page, reopen_location
+
+
+PLACE_UNSET = "Select"
+PLACES_API = "https://countriesnow.space/api/v0.1"
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+PLACE_HEADERS = {"User-Agent": "SmartCrop/1.3 (educational research client)"}
+
+
+def explain_place_failure(exc):
+    """Separate a place-directory outage from a name that has no coordinates."""
+    status = _http_status(exc)
+    if (
+        isinstance(exc, (requests.Timeout, requests.ConnectionError))
+        or (status is not None and (status >= 500 or status == 429))
+    ):
+        return (
+            "service",
+            "The place list did not respond. This is a temporary service problem, "
+            "not a system error in SmartCrop. Refresh the page to try again, or click the map.",
+        )
+    return (
+        "unavailable",
+        "The place list could not provide that entry. This is not a system error. "
+        "Choose another place or click the map.",
+    )
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_place_countries():
+    response = requests.get(f"{PLACES_API}/countries/positions", timeout=30)
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("error"):
+        raise ValueError(payload.get("msg") or "The place directory returned an error.")
+    rows = []
+    for item in payload.get("data") or []:
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        try:
+            lat, lon = float(item.get("lat")), float(item.get("long"))
+        except (TypeError, ValueError):
+            lat, lon = None, None
+        rows.append({"name": name, "lat": lat, "lon": lon})
+    rows.sort(key=lambda row: row["name"].casefold())
+    return rows
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_place_regions(country):
+    response = requests.post(
+        f"{PLACES_API}/countries/states",
+        json={"country": country},
+        timeout=30,
+    )
+    if response.status_code == 404:
+        return []
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("error"):
+        return []
+    choices, seen = [], set()
+    for state in (payload.get("data") or {}).get("states") or []:
+        api_name = str(state.get("name") or "").strip()
+        if not api_name:
+            continue
+        label = api_name[:-9] if api_name.endswith(" Province") else api_name
+        if label.casefold() in seen:
+            label = api_name
+        seen.add(label.casefold())
+        choices.append({"label": label, "value": api_name})
+    choices.sort(key=lambda row: row["label"].casefold())
+    return choices
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_place_districts(country, region):
+    response = requests.post(
+        f"{PLACES_API}/countries/state/cities",
+        json={"country": country, "state": region},
+        timeout=30,
+    )
+    if response.status_code == 404:
+        return []
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("error"):
+        return []
+    grouped = {}
+    for name in payload.get("data") or []:
+        raw = str(name).strip()
+        if not raw:
+            continue
+        label = raw.replace(" İlçesi", "").replace(" Ilçesi", "").strip()
+        grouped.setdefault(label.casefold(), []).append(raw)
+    choices = []
+    for names in grouped.values():
+        preferred = next((name for name in names if "İlçesi" in name or "Ilçesi" in name), names[0])
+        label = preferred.replace(" İlçesi", "").replace(" Ilçesi", "").strip()
+        choices.append({"label": label, "value": preferred})
+    choices.sort(key=lambda row: row["label"].casefold())
+    return choices
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def geocode_place(query, expected_name):
+    """Return coordinates for the result whose name matches the chosen place."""
+    response = requests.get(
+        NOMINATIM_URL,
+        params={"q": query, "format": "jsonv2", "limit": 5},
+        headers=PLACE_HEADERS,
+        timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    expected = "".join(ch for ch in expected_name.casefold() if ch.isalnum())
+    if not expected:
+        return None
+    for item in payload or []:
+        head = str(item.get("display_name") or "").split(",")[0]
+        actual = "".join(ch for ch in head.casefold() if ch.isalnum())
+        if actual == expected or actual.startswith(expected) or expected.startswith(actual):
+            return float(item["lat"]), float(item["lon"])
+    return None
+
+
+def adopt_point(lat, lon, label):
+    """Store a pin. Clear loaded climate and soil only when the point actually moves."""
+    moved = (
+        abs(float(lat) - st.session_state.selected_lat) > 0.0001
+        or abs(float(lon) - st.session_state.selected_lon) > 0.0001
+    )
+    first = not st.session_state.location_chosen
+    st.session_state.location_chosen = True
+    st.session_state.selected_lat = float(lat)
+    st.session_state.selected_lon = float(lon)
+    st.session_state.location_label = label
+    if moved:
+        clear_point_results()
+    return first or moved
+
+
+def begin_point_load():
+    """A new pin loads climate and soil on its own, then opens Climate."""
+    st.session_state.pending_point_load = True
+    st.rerun()
+
+
+def render_place_selectors(prefix=""):
+    """Country, city, and district lists. A completed choice moves the pin."""
+    country_key = f"{prefix}place_country"
+    region_key = f"{prefix}place_region"
+    district_key = f"{prefix}place_district"
+    seen_country_key = f"{prefix}place_country_seen"
+    seen_region_key = f"{prefix}place_region_seen"
+    section("Choose a country, city, and district")
+    st.caption(
+        "City is the province or state. District is a locality inside it. "
+        "You can also click the map below. Data loads as soon as the pin is set."
+    )
+    try:
+        countries = fetch_place_countries()
+    except Exception as exc:
+        show_remote_notice(notice_from(exc, explain_place_failure))
+        return None
+
+    if st.session_state.pop(f"{prefix}reset_place_lists", False):
+        st.session_state[country_key] = PLACE_UNSET
+        st.session_state[region_key] = PLACE_UNSET
+        st.session_state[district_key] = PLACE_UNSET
+        st.session_state[seen_country_key] = PLACE_UNSET
+        st.session_state[seen_region_key] = (PLACE_UNSET, PLACE_UNSET)
+        st.session_state.applied_place_key = None
+        st.session_state.place_notice = None
+
+    by_name = {row["name"]: row for row in countries}
+    country_col, city_col, district_col = st.columns(3)
+    with country_col:
+        country = st.selectbox("Country", [PLACE_UNSET] + list(by_name), key=country_key)
+    if st.session_state.get(seen_country_key) != country:
+        st.session_state[region_key] = PLACE_UNSET
+        st.session_state[district_key] = PLACE_UNSET
+        st.session_state[seen_country_key] = country
+
+    regions, region_error = [], None
+    if country != PLACE_UNSET:
+        try:
+            regions = fetch_place_regions(country)
+        except Exception as exc:
+            region_error = notice_from(exc, explain_place_failure)
+    region_by_label = {row["label"]: row["value"] for row in regions}
+    region_options = [PLACE_UNSET] + list(region_by_label)
+    if st.session_state.get(region_key, PLACE_UNSET) not in region_options:
+        st.session_state[region_key] = PLACE_UNSET
+    with city_col:
+        region_label = st.selectbox(
+            "City",
+            region_options,
+            key=region_key,
+            disabled=country == PLACE_UNSET,
+        )
+    if st.session_state.get(seen_region_key) != (country, region_label):
+        st.session_state[district_key] = PLACE_UNSET
+        st.session_state[seen_region_key] = (country, region_label)
+
+    region_value = region_by_label.get(region_label)
+    districts, district_error = [], None
+    if region_value:
+        try:
+            districts = fetch_place_districts(country, region_value)
+        except Exception as exc:
+            district_error = notice_from(exc, explain_place_failure)
+    district_by_label = {row["label"]: row["value"] for row in districts}
+    district_options = [PLACE_UNSET] + list(district_by_label)
+    if st.session_state.get(district_key, PLACE_UNSET) not in district_options:
+        st.session_state[district_key] = PLACE_UNSET
+    with district_col:
+        district_label = st.selectbox(
+            "District",
+            district_options,
+            key=district_key,
+            disabled=not districts,
+        )
+    show_remote_notice(region_error or district_error)
+
+    district_value = district_by_label.get(district_label)
+    place_key, queries, place_label = None, [], None
+    if region_value and district_value:
+        place_key = (country, region_value, district_value)
+        place_label = f"{district_label}, {region_label}, {country}"
+        queries = [
+            f"{district_label}, {region_label}, {country}",
+            f"{district_value}, {region_value}, {country}",
+        ]
+    elif region_value and not districts and district_error is None:
+        place_key = (country, region_value, "")
+        place_label = f"{region_label}, {country}"
+        queries = [f"{region_label}, {country}", f"{region_value}, {country}"]
+        st.caption("This city has no district list. The pin uses the city center.")
+
+    if place_key and place_key != st.session_state.applied_place_key:
+        try:
+            found = None
+            target_name = district_label if district_value else region_label
+            for query in queries:
+                found = geocode_place(query, target_name)
+                if found:
+                    break
+            st.session_state.applied_place_key = place_key
+            if not found:
+                st.session_state.place_notice = {
+                    "kind": "unavailable",
+                    "text": (
+                        "No coordinates were found for this place. This is not a system error. "
+                        "Choose another district or click the map."
+                    ),
+                }
+            else:
+                st.session_state.place_notice = None
+                if adopt_point(found[0], found[1], place_label):
+                    begin_point_load()
+        except Exception as exc:
+            st.session_state.applied_place_key = place_key
+            st.session_state.place_notice = notice_from(exc, explain_place_failure)
+    show_remote_notice(st.session_state.place_notice)
+
+    if not st.session_state.location_chosen and country != PLACE_UNSET:
+        row = by_name.get(country) or {}
+        if row.get("lat") is not None and row.get("lon") is not None:
+            return (row["lat"], row["lon"], 4)
+    return None
+
+
+def render_location_map(prefix=""):
+    """Full-width map. A pin exists only after the user chooses a point."""
+    preview = render_place_selectors(prefix)
+    section("Or click the map")
+    st.caption(
+        "A map click places the pin directly. "
+        "Climate and soil data load on their own, and the Climate page opens."
+    )
+    center_lat = st.session_state.selected_lat
+    center_lon = st.session_state.selected_lon
+    zoom = 5 if st.session_state.location_chosen else 2
+    if preview and not st.session_state.location_chosen:
+        center_lat, center_lon, zoom = preview
+    map_view = folium.Map(
+        location=[center_lat, center_lon],
+        zoom_start=zoom,
+        tiles=None,
+        min_zoom=1,
+        max_zoom=18,
+        control_scale=True,
+    )
+    # Esri World Street Map generally uses English cartographic labels,
+    # unlike the default OSM layer which may show local-language names.
+    folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+        attr="Tiles &copy; Esri &mdash; Sources: Esri, Garmin, USGS, NOAA",
+        name="World map (English labels)",
+        overlay=False,
+        control=False,
+        show=True,
+    ).add_to(map_view)
+    if st.session_state.location_chosen:
+        folium.Marker(
+            [st.session_state.selected_lat, st.session_state.selected_lon],
+            tooltip="Selected SmartCrop location",
+            popup=(
+                f"Selected point: {st.session_state.selected_lat:.4f}, "
+                f"{st.session_state.selected_lon:.4f}"
+            ),
+            icon=folium.Icon(color="green"),
+        ).add_to(map_view)
+    map_result = st_folium(
+        map_view,
+        height=520,
+        use_container_width=True,
+        returned_objects=["last_clicked"],
+        key=f"{prefix}location_map",
+    )
+    clicked = map_result.get("last_clicked") if map_result else None
+    if clicked:
+        new_lat = float(clicked["lat"])
+        new_lon = float(clicked["lng"])
+        moved = (
+            abs(new_lat - st.session_state.selected_lat) > 0.0001
+            or abs(new_lon - st.session_state.selected_lon) > 0.0001
+        )
+        if not st.session_state.location_chosen or moved:
+            st.session_state[f"{prefix}reset_place_lists"] = True
+            if adopt_point(new_lat, new_lon, "Chosen on the map"):
+                begin_point_load()
+
+
+def prompt_for_location():
+    st.warning("No location is selected. Choose a place on the Location page before reading this report.")
+    if st.button("Go to Location", key="go_to_location", type="primary"):
+        st.session_state.pending_nav = "Location"
+        st.rerun()
+
+
+def render_report_rail(side, label, target):
+    """Full-height green rail. Right continues the report, left returns."""
+    st.markdown(
+        "<style>[data-testid='stMainBlockContainer']{padding-left:96px !important;padding-right:96px !important;}</style>",
+        unsafe_allow_html=True,
+    )
+    key = "rail_soil" if side == "right" else "rail_climate"
+    if st.button(label, key=key):
+        st.session_state.pending_nav = target
+        st.rerun()
+
+
+def prompt_for_climate():
+    st.info(
+        "Climate data loads automatically when a place is chosen. "
+        "This page stays empty until NASA POWER returns a 1991–2020 record for that pin."
+    )
+    show_remote_notice(st.session_state.climate_notice)
+
+
+def load_selected_point(ecological, catalog):
+    """Fetch climate and soil for the current pin. No extra button."""
+    lat = st.session_state.selected_lat
+    lon = st.session_state.selected_lon
+    try:
+        climate_package = fetch_nasa_power_climate_normals(lat, lon, 1991, 2020)
+        result = climate_package["monthly_normals"]
+        st.session_state.selected_climate = result
+        st.session_state.selected_climate_history = climate_package["monthly_history"]
+        st.session_state.selected_annual_climate = climate_package["annual_summary"]
+        st.session_state.climate_period = climate_package["period"]
+        st.session_state.climate_location = current_point()
+        st.session_state.climate_notice = None
+    except Exception as exc:
+        st.session_state.climate_notice = notice_from(exc, explain_climate_failure)
+        st.session_state.selected_climate = pd.DataFrame()
+        st.session_state.selected_climate_history = pd.DataFrame()
+        st.session_state.selected_annual_climate = pd.DataFrame()
+        st.session_state.climate_period = None
+        st.session_state.climate_location = None
+        st.session_state.location_suitability = pd.DataFrame()
+        st.session_state.location_rotations = pd.DataFrame()
+
+    try:
+        soil_result = fetch_soilgrids_point(lat, lon)
+        st.session_state.selected_soil = soil_result
+        st.session_state.soil_location = current_point()
+        st.session_state.location_soil_ph = soil_result.get("phh2o")
+        ph_missing = soil_result.get("phh2o") is None
+        texture_ok = bool(soil_result.get("texture_complete"))
+        if ph_missing and not texture_ok:
+            notice_text = (
+                "SoilGrids has no usable pH or complete texture for this pin. "
+                "This is a data gap, not a system error. Missing values were not filled in."
+            )
+        elif ph_missing:
+            notice_text = (
+                "SoilGrids returned texture but no valid pH for this pin. "
+                "Screening continues without pH. This is a data gap, not a system error."
+            )
+        elif not texture_ok:
+            notice_text = (
+                "SoilGrids pH is available, but the texture fractions are incomplete. "
+                "Texture was not guessed or filled in."
+            )
+        elif soil_result.get("property_errors"):
+            notice_text = (
+                "Some SoilGrids properties were unavailable. "
+                "Available values are shown and missing values are not filled in."
+            )
+        else:
+            notice_text = None
+        st.session_state.soil_notice = (
+            {"kind": "unavailable", "text": notice_text} if notice_text else None
+        )
+    except Exception as exc:
+        st.session_state.soil_notice = notice_from(exc, explain_soil_failure)
+        st.session_state.selected_soil = None
+        st.session_state.soil_location = None
+        st.session_state.location_soil_ph = None
+
+    if climate_is_current():
+        matching_soil = st.session_state.selected_soil if soil_is_current() else None
+        selected_ph = matching_soil.get("phh2o") if matching_soil else None
+        st.session_state.location_soil_ph = selected_ph
+        st.session_state.location_suitability = build_location_suitability(
+            st.session_state.selected_climate,
+            ecological,
+            catalog,
+            soil_ph=selected_ph,
+            soil_texture=matching_soil,
+        )
+        st.session_state.location_rotations = build_location_rotations(
+            st.session_state.location_suitability
+        )
+
+
+def render_point_facts():
+    """Listed technical values for the selected pin."""
+    section("Technical record")
+    lat = st.session_state.selected_lat
+    lon = st.session_state.selected_lon
+    rows = [
+        ("Place", st.session_state.location_label or "Map point"),
+        ("Coordinates", f"{lat:.4f}, {lon:.4f}"),
+    ]
+    if climate_is_current():
+        frame = st.session_state.selected_climate
+        temperature = pd.to_numeric(frame.get("avg_temperature"), errors="coerce")
+        rainfall = pd.to_numeric(frame.get("total_rainfall"), errors="coerce")
+        rows.append(("Climate period", str(st.session_state.climate_period or "1991–2020")))
+        rows.append(("Mean monthly temperature", f"{fmt(temperature.mean())} °C"))
+        rows.append(("Mean annual precipitation", f"{fmt(rainfall.sum(), 0)} mm"))
+        if "avg_solar_radiation" in frame.columns:
+            solar = pd.to_numeric(frame["avg_solar_radiation"], errors="coerce")
+            rows.append(("Mean daily solar radiation", f"{fmt(solar.mean())} MJ/m²/day"))
+    else:
+        rows.append(("Climate", "Not available"))
+    if soil_is_current():
+        soil_values = st.session_state.selected_soil or {}
+        ph_value = soil_values.get("phh2o")
+        rows.append(("Soil pH", fmt(ph_value, 2) if ph_value is not None else "Not available"))
+        for key, label in (("sand", "Sand"), ("silt", "Silt"), ("clay", "Clay")):
+            value = soil_values.get(key)
+            rows.append((label, f"{fmt(value, 1)}%" if value is not None else "Not available"))
+    else:
+        rows.append(("Soil", "Not available"))
+    items = "".join(
+        f'<div class="fact"><span>{html.escape(label)}</span>'
+        f"<strong>{html.escape(str(value))}</strong></div>"
+        for label, value in rows
+    )
+    st.markdown(f'<div class="facts">{items}</div>', unsafe_allow_html=True)
 
 
 def get_tables():
@@ -827,33 +1669,25 @@ if "selected_soil" not in st.session_state:
     st.session_state.selected_soil = None
 if "soil_location" not in st.session_state:
     st.session_state.soil_location = None
-if "location_load_pending" not in st.session_state:
-    st.session_state.location_load_pending = False
-if "climate_load_error" not in st.session_state:
-    st.session_state.climate_load_error = None
-if "soil_load_error" not in st.session_state:
-    st.session_state.soil_load_error = None
+if "location_chosen" not in st.session_state:
+    st.session_state.location_chosen = False
+if "climate_notice" not in st.session_state:
+    st.session_state.climate_notice = None
+if "soil_notice" not in st.session_state:
+    st.session_state.soil_notice = None
+if "location_label" not in st.session_state:
+    st.session_state.location_label = None
+if "applied_place_key" not in st.session_state:
+    st.session_state.applied_place_key = None
+if "place_notice" not in st.session_state:
+    st.session_state.place_notice = None
+pending_nav = st.session_state.pop("pending_nav", None)
+if pending_nav:
+    st.session_state.nav_page = pending_nav
+elif st.session_state.get("pending_point_load"):
+    st.session_state.nav_page = "Climate Analysis"
 
-with st.sidebar:
-    st.markdown("# 🌱 SmartCrop")
-    st.caption("NASA Space Apps Challenge")
-    st.divider()
-    page = st.radio(
-        "NAVIGATION",
-        [
-            "Overview",
-            "Climate Analysis",
-            "Soil Analysis",
-            "Crop Suitability",
-            "Crop Rotation",
-            "Data Sources",
-        ],
-        label_visibility="visible",
-    )
-    st.divider()
-    st.caption("SELECTED GLOBAL LOCATION")
-    st.markdown(f"**{st.session_state.selected_lat:.4f}, {st.session_state.selected_lon:.4f}**")
-    st.caption("Select a point on the map to automatically load available data.")
+page, reopen_location = render_topnav()
 
 climate = data("climate_monthly")
 soil = data("soil_site_summary")
@@ -864,270 +1698,60 @@ root = data("crop_root_zone_water")
 ecological = data("crop_ecological_requirements")
 catalog = data("crop_catalog")
 
-if page == "Overview":
+if st.session_state.pop("pending_point_load", False):
+    with st.spinner("Loading NASA POWER climate data and SoilGrids soil data for this pin..."):
+        load_selected_point(ecological, catalog)
+    st.rerun()
+
+
+@st.dialog("Choose a location", width="large")
+def location_dialog():
+    """Location picker opened from the place button. A choice loads data immediately."""
+    render_location_map("dialog_")
+
+
+if reopen_location:
+    location_dialog()
+
+if page == "Location":
     hero(
-        "Smarter decisions for healthier fields.",
-        "Explore satellite-derived climate and soil information, compare crop requirements, and review transparent rotation scenarios.",
+        "Choose a location.",
+        "Select a district or click the map. Climate and soil load on their own, then the Climate page opens.",
     )
-    overview_location_current = (
-        not st.session_state.selected_climate.empty
-        and st.session_state.climate_location == (
-            st.session_state.selected_lat, st.session_state.selected_lon
+    render_location_map()
+
+    if not st.session_state.location_chosen:
+        st.info(
+            "No location selected yet. Choose a district from the lists, or click the map. "
+            "The opening view is only a map center, not a selected field."
         )
-    )
-    # Only show location-specific screening after climate data have been loaded
-    # for the exact currently selected coordinates. Never fall back to the
-    # static Antalya pilot scores for an unrelated global point.
-    if overview_location_current and not st.session_state.location_suitability.empty:
-        overview_scores = st.session_state.location_suitability.copy()
-        overview_name_col = "Crop"
-        overview_score_col = "Preliminary score"
-        overview_rotation_count = len(st.session_state.location_rotations)
-        overview_climate_count = len(st.session_state.selected_climate)
-        screening_calculated = True
-    else:
-        overview_scores = pd.DataFrame()
-        overview_name_col = None
-        overview_score_col = None
-        overview_rotation_count = 0
-        overview_climate_count = 0
-        screening_calculated = False
-
-    valid_scores = (
-        pd.to_numeric(overview_scores[overview_score_col], errors="coerce").notna().sum()
-        if overview_score_col and not overview_scores.empty else 0
-    )
-    a, b, c, d = st.columns(4)
-    a.metric(
-        "Selected point",
-        f"{st.session_state.selected_lat:.4f}, {st.session_state.selected_lon:.4f}",
-    )
-    b.metric("Climate records", f"{overview_climate_count} months" if screening_calculated else "Not loaded")
-    c.metric("Scored crops", str(valid_scores) if screening_calculated else "Not calculated")
-    d.metric(
-        "Rotation candidates",
-        (str(overview_rotation_count) if overview_rotation_count > 0 else "None eligible")
-        if screening_calculated else "Not calculated",
-    )
-
-    left, right = st.columns([1.12, 1])
-    with left:
-        section("Select any location worldwide")
-        st.caption("Step 1: Click anywhere on the map. SmartCrop will automatically load available NASA POWER climate and SoilGrids data for that point.")
-        map_view = folium.Map(
-            location=[st.session_state.selected_lat, st.session_state.selected_lon],
-            zoom_start=2 if st.session_state.climate_location is None else 5,
-            tiles=None,
-            min_zoom=1,
-            max_zoom=18,
-            control_scale=True,
-        )
-        # Esri World Street Map generally uses English cartographic labels,
-        # unlike the default OSM layer which may show local-language names.
-        folium.TileLayer(
-            tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
-            attr="Tiles &copy; Esri &mdash; Sources: Esri, Garmin, USGS, NOAA",
-            name="World map (English labels)",
-            overlay=False,
-            control=False,
-            show=True,
-        ).add_to(map_view)
-        folium.Marker(
-            [st.session_state.selected_lat, st.session_state.selected_lon],
-            tooltip="Selected SmartCrop location",
-            popup=f"Selected point: {st.session_state.selected_lat:.4f}, {st.session_state.selected_lon:.4f}",
-            icon=folium.Icon(color="green"),
-        ).add_to(map_view)
-        map_result = st_folium(
-            map_view,
-            height=390,
-            use_container_width=True,
-            returned_objects=["last_clicked"],
-            key="global_location_map",
-        )
-        clicked = map_result.get("last_clicked") if map_result else None
-        if clicked:
-            new_lat = float(clicked["lat"])
-            new_lon = float(clicked["lng"])
-            if (abs(new_lat - st.session_state.selected_lat) > 0.0001 or
-                    abs(new_lon - st.session_state.selected_lon) > 0.0001):
-                st.session_state.selected_lat = new_lat
-                st.session_state.selected_lon = new_lon
-                st.session_state.selected_climate = pd.DataFrame()
-                st.session_state.selected_climate_history = pd.DataFrame()
-                st.session_state.selected_annual_climate = pd.DataFrame()
-                st.session_state.climate_period = None
-                st.session_state.climate_location = None
-                st.session_state.location_suitability = pd.DataFrame()
-                st.session_state.location_rotations = pd.DataFrame()
-                st.session_state.location_soil_ph = None
-                st.session_state.selected_soil = None
-                st.session_state.soil_location = None
-                st.session_state.climate_load_error = None
-                st.session_state.soil_load_error = None
-                st.session_state.location_load_pending = True
-                st.rerun()
-
-        st.write(
-            f"**Selected coordinates:** {st.session_state.selected_lat:.4f}, "
-            f"{st.session_state.selected_lon:.4f}"
-        )
-        # Automatically fetch both data sources after a new map point is selected.
-        # Users do not need to discover or press a separate red load button.
-        if st.session_state.location_load_pending:
-            st.session_state.location_load_pending = False
-            selected_point = (
-                st.session_state.selected_lat, st.session_state.selected_lon
-            )
-            with st.spinner(
-                "Loading climate and soil data for your selected location..."
-            ):
-                try:
-                    climate_package = fetch_nasa_power_climate_normals(
-                        selected_point[0], selected_point[1], 1991, 2020
-                    )
-                    st.session_state.selected_climate = climate_package["monthly_normals"]
-                    st.session_state.selected_climate_history = climate_package["monthly_history"]
-                    st.session_state.selected_annual_climate = climate_package["annual_summary"]
-                    st.session_state.climate_period = climate_package["period"]
-                    st.session_state.climate_location = selected_point
-                    st.session_state.climate_load_error = None
-                except Exception as exc:
-                    st.session_state.selected_climate = pd.DataFrame()
-                    st.session_state.selected_climate_history = pd.DataFrame()
-                    st.session_state.selected_annual_climate = pd.DataFrame()
-                    st.session_state.climate_location = None
-                    st.session_state.climate_load_error = str(exc)
-
-                try:
-                    soil_result = fetch_soilgrids_point(*selected_point)
-                    st.session_state.selected_soil = soil_result
-                    st.session_state.soil_location = selected_point
-                    st.session_state.soil_load_error = None
-                except Exception as exc:
-                    st.session_state.selected_soil = None
-                    st.session_state.soil_location = None
-                    st.session_state.soil_load_error = str(exc)
-
-            climate_is_current = (
-                not st.session_state.selected_climate.empty
-                and st.session_state.climate_location == selected_point
-            )
-            soil_is_current = (
-                st.session_state.selected_soil is not None
-                and st.session_state.soil_location == selected_point
-            )
-            if climate_is_current:
-                soil_result = st.session_state.selected_soil if soil_is_current else None
-                st.session_state.location_soil_ph = (
-                    soil_result.get("phh2o") if soil_result else None
-                )
-                st.session_state.location_suitability = build_location_suitability(
-                    st.session_state.selected_climate,
-                    ecological,
-                    catalog,
-                    soil_ph=st.session_state.location_soil_ph,
-                    soil_texture=soil_result,
-                )
-                st.session_state.location_rotations = build_location_rotations(
-                    st.session_state.location_suitability
-                )
-            else:
-                st.session_state.location_suitability = pd.DataFrame()
-                st.session_state.location_rotations = pd.DataFrame()
-            st.rerun()
-
-        if st.session_state.climate_load_error:
-            st.warning(
-                "NASA POWER climate data are unavailable for this point. "
-                "Crop scores and climate charts cannot be calculated until valid climate data are returned. "
-                f"Details: {st.session_state.climate_load_error}"
-            )
-        if st.session_state.soil_load_error:
-            st.warning(
-                "SoilGrids data are unavailable or incomplete for this point. "
-                "The app will continue with the soil properties that are actually available; "
-                "missing values are not treated as zero. "
-                f"Details: {st.session_state.soil_load_error}"
-            )
-        if st.session_state.climate_load_error or st.session_state.soil_load_error:
-            if st.button("Retry unavailable data", use_container_width=True):
-                st.session_state.location_load_pending = True
-                st.rerun()
-
-        st.caption("Global point selection is enabled. Climate screening uses a 1991–2020 NASA POWER reference period; SoilGrids data are retrieved separately for the selected point.")
-    with right:
-        section("Preliminary crop screening")
-        if overview_location_current and overview_score_col and overview_name_col:
-            st.caption(
-                f"Live climate/soil screening · "
-                f"{st.session_state.selected_lat:.4f}, {st.session_state.selected_lon:.4f}"
-            )
-        else:
-            st.caption(
-                "Original Antalya pilot assessment · load climate data for the selected point "
-                "to refresh this table"
-            )
-        if screening_calculated and overview_score_col and overview_name_col and not overview_scores.empty:
-            overview_columns = [overview_name_col, overview_score_col]
-            if "Eligibility" in overview_scores.columns:
-                overview_columns.append("Eligibility")
-            view = overview_scores[overview_columns].copy()
-            view[overview_score_col] = pd.to_numeric(view[overview_score_col], errors="coerce")
-            view = view.dropna(subset=[overview_score_col]).sort_values(overview_score_col, ascending=False)
-            view[overview_name_col] = view[overview_name_col].map(pretty_crop)
-            rename_map = {overview_name_col: "Crop", overview_score_col: "Preliminary score"}
-            view = view.rename(columns=rename_map)
-            view["Preliminary score"] = view["Preliminary score"].map(lambda x: fmt(x))
-            st.dataframe(view, hide_index=True, use_container_width=True)
-            if "Eligibility" in view.columns and view["Eligibility"].eq("Outside absolute limits").any():
-                st.warning("Some crops cross at least one ECOCROP absolute climate/soil limit. Their weighted screening scores remain visible for transparency, but they are excluded from rotation candidates.")
-            if overview_rotation_count == 0:
-                st.info("No three-crop rotation currently meets the screening eligibility and crop-group diversity rules for this point.")
-        else:
-            st.info(
-                "Select a point on the map to start. SmartCrop will automatically retrieve available climate and soil data, then calculate crop screening and rotation scenarios."
-            )
-    st.info(
-        "After you select a map point, SmartCrop automatically requests NASA POWER climate normals (1991–2020) and SoilGrids topsoil estimates. "
-        "If a source has no valid data or times out, the app displays a warning and does not invent missing values. The climate baseline is historical, not a forecast."
-    )
 
 elif page == "Climate Analysis":
+    render_report_rail("right", "Soil", "Soil Analysis")
     hero(
         "Climate analysis",
         "30-year monthly climate reference derived from NASA POWER monthly observations.",
     )
-    selected_is_current = (
-        not st.session_state.selected_climate.empty
-        and st.session_state.climate_location == (
-            st.session_state.selected_lat, st.session_state.selected_lon
-        )
-    )
-    if selected_is_current:
+    if st.session_state.location_chosen:
+        render_point_facts()
+        show_remote_notice(st.session_state.soil_notice)
+    if not st.session_state.location_chosen:
+        prompt_for_location()
+        climate_to_show = pd.DataFrame()
+        annual_history = pd.DataFrame()
+    elif not climate_is_current():
+        prompt_for_climate()
+        climate_to_show = pd.DataFrame()
+        annual_history = pd.DataFrame()
+    else:
         climate_to_show = st.session_state.selected_climate.copy()
         st.success(
             f"Showing NASA POWER {st.session_state.climate_period} reference data for "
             f"{st.session_state.selected_lat:.4f}, {st.session_state.selected_lon:.4f}"
         )
         annual_history = st.session_state.selected_annual_climate.copy()
-    else:
-        climate_to_show = pd.DataFrame()
-        annual_history = pd.DataFrame()
-        if st.session_state.climate_load_error:
-            st.warning(
-                "NASA POWER did not return usable climate data for this coordinate. "
-                "The climate charts and crop scores are unavailable until a valid response is received. "
-                f"Details: {st.session_state.climate_load_error}"
-            )
-        else:
-            st.info(
-                "Select a point on the Overview map. NASA POWER climate data will be requested automatically."
-            )
 
-    if climate_to_show.empty:
-        st.warning("No valid long-term climate reference is currently available for this selected point.")
-    else:
+    if not climate_to_show.empty:
         month = "month"
         df = climate_to_show.copy()
         chart_specs = [
@@ -1187,140 +1811,127 @@ elif page == "Climate Analysis":
                 hide_index=True,
                 use_container_width=True,
             )
-
-    st.caption(
-        "Source: NASA POWER Monthly Point API. Reference period: 1991–2020. "
-        "Monthly precipitation totals are derived from the returned mean daily precipitation rate "
-        "multiplied by the number of calendar days in each month. This is a historical reference, "
-        "not a forecast."
-    )
+        st.caption(
+            "Source: NASA POWER Monthly Point API. Reference period: 1991–2020. "
+            "Monthly precipitation totals are derived from the returned mean daily precipitation rate "
+            "multiplied by the number of calendar days in each month. This is a historical reference, "
+            "not a forecast."
+        )
 
 elif page == "Soil Analysis":
+    render_report_rail("left", "Climate", "Climate Analysis")
+    render_report_rail("right", "Suitability", "Crop Suitability")
     hero(
         "Soil analysis",
-        "Location-specific topsoil estimates retrieved from ISRIC SoilGrids.",
+        "Location-specific topsoil estimates retrieved from ISRIC SoilGrids, not from NASA.",
     )
-    selected_point = (
-        st.session_state.selected_lat, st.session_state.selected_lon
-    )
-    soil_is_current = (
-        st.session_state.selected_soil is not None
-        and st.session_state.soil_location == selected_point
-    )
-
-    st.write(
-        f"**Selected coordinates:** {selected_point[0]:.4f}, {selected_point[1]:.4f}"
-    )
-    st.caption(
-        "Retrieves SoilGrids mean predictions for the 0–5 cm topsoil layer "
-        "at the selected map coordinate."
-    )
-
-    if st.session_state.soil_load_error and not soil_is_current:
-        st.warning(
-            "SoilGrids data could not be loaded for this coordinate. "
-            "Climate analysis can still be used if NASA POWER data are available. "
-            "Return to Overview and use 'Retry unavailable data' to try again. "
-            f"Details: {st.session_state.soil_load_error}"
-        )
-    elif not soil_is_current:
-        st.info(
-            "Select a point on the Overview map. SoilGrids data will be requested automatically."
-        )
-
-    if soil_is_current:
-        soil_values = st.session_state.selected_soil
-        st.success(
-            f"Showing SoilGrids estimates for "
-            f"{selected_point[0]:.4f}, {selected_point[1]:.4f}"
-        )
-        m1, m2, m3, m4 = st.columns(4)
-        ph_value = soil_values.get("phh2o")
-        m1.metric("Soil pH (H₂O)", fmt(ph_value, 2) if ph_value is not None else "Not available")
-        for column, key, label in [(m2, "sand", "Sand"), (m3, "silt", "Silt"), (m4, "clay", "Clay")]:
-            value = soil_values.get(key)
-            column.metric(label, f"{fmt(value, 1)}%" if value is not None else "Not available")
-
-        texture_values = {
-            "sand": soil_values.get("sand"),
-            "silt": soil_values.get("silt"),
-            "clay": soil_values.get("clay"),
-        }
-        available_texture = {
-            k: float(v) for k, v in texture_values.items()
-            if v is not None and pd.notna(v) and 0 <= float(v) <= 100
-        }
-        texture_complete = bool(soil_values.get("texture_complete"))
-        if available_texture:
-            texture_df = pd.DataFrame({
-                "Soil particle": [k.capitalize() for k in available_texture],
-                "Percentage": list(available_texture.values()),
-            })
-            section("Topsoil texture composition · 0–5 cm" if texture_complete else "Available texture fractions · incomplete")
-            fig = px.bar(
-                texture_df,
-                x="Percentage",
-                y="Soil particle",
-                orientation="h",
-                text_auto=".1f",
-                color="Soil particle",
-                title="Estimated soil texture fractions (%)",
-            )
-            fig.update_layout(
-                template="plotly_white", height=300, showlegend=False,
-                xaxis=dict(title="Percentage", range=[0, 100], ticksuffix="%"),
-                margin=dict(l=15, r=15, t=35, b=15),
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.warning(
-                "SoilGrids did not return valid topsoil texture values for this point. "
-                "The zero or missing raster cells were rejected instead of being shown "
-                "as 0%. Try a nearby point or reload the soil data."
-            )
-        if soil_values.get("texture_sum_pct") is not None:
-            st.caption(
-                f"Texture fractions total: {fmt(soil_values['texture_sum_pct'], 1)}%. "
-                "Small differences from 100% can occur because these are independently modelled estimates."
-            )
-        else:
-            st.caption("Some texture fractions are unavailable at this coordinate; missing values are not estimated or filled in.")
-        if not texture_complete:
-            st.warning("The texture response is incomplete. Do not interpret the available fractions as a complete 100% soil composition or use them for texture classification.")
-        if soil_values.get("property_errors"):
-            with st.expander("SoilGrids request diagnostics"):
-                for prop_name, error_text in soil_values["property_errors"].items():
-                    st.write(f"**{prop_name}:** {error_text}")
-        if soil_values.get("sample_distance_m"):
-            st.caption("Nearest valid SoilGrids pixel distance (m): " + ", ".join(
-                f"{k}: {v if v is not None else 'N/A'}" for k, v in soil_values["sample_distance_m"].items()
-            ))
-        st.caption(
-            "Source: ISRIC SoilGrids 2.0 WCS · 250 m grid · mean prediction · 0–5 cm. "
-            "These are model estimates, not field measurements."
-        )
+    if not st.session_state.location_chosen:
+        prompt_for_location()
     else:
-        st.info(
-            "No SoilGrids result has been loaded for this selected coordinate yet. "
-            "Click the button above to retrieve the local topsoil estimates."
+        selected_point = current_point()
+        st.write(
+            f"**Selected coordinates:** {selected_point[0]:.4f}, {selected_point[1]:.4f}"
         )
+        st.caption(
+            "SoilGrids mean predictions for the 0–5 cm layer at the selected pin. "
+            "A missing value means SoilGrids has no estimate there. It is not filled in."
+        )
+
+        show_remote_notice(st.session_state.soil_notice)
+
+        if soil_is_current():
+            soil_values = st.session_state.selected_soil
+            st.success(
+                f"Showing SoilGrids estimates for "
+                f"{selected_point[0]:.4f}, {selected_point[1]:.4f}"
+            )
+            m1, m2, m3, m4 = st.columns(4)
+            ph_value = soil_values.get("phh2o")
+            m1.metric("Soil pH (H₂O)", fmt(ph_value, 2) if ph_value is not None else "Not available")
+            for column, key, label in [(m2, "sand", "Sand"), (m3, "silt", "Silt"), (m4, "clay", "Clay")]:
+                value = soil_values.get(key)
+                column.metric(label, f"{fmt(value, 1)}%" if value is not None else "Not available")
+
+            texture_values = {
+                "sand": soil_values.get("sand"),
+                "silt": soil_values.get("silt"),
+                "clay": soil_values.get("clay"),
+            }
+            available_texture = {
+                k: float(v) for k, v in texture_values.items()
+                if v is not None and pd.notna(v) and 0 <= float(v) <= 100
+            }
+            texture_complete = bool(soil_values.get("texture_complete"))
+            if available_texture:
+                texture_df = pd.DataFrame({
+                    "Soil particle": [k.capitalize() for k in available_texture],
+                    "Percentage": list(available_texture.values()),
+                })
+                section(
+                    "Topsoil texture composition · 0–5 cm"
+                    if texture_complete else "Available texture fractions · incomplete"
+                )
+                fig = px.bar(
+                    texture_df,
+                    x="Percentage",
+                    y="Soil particle",
+                    orientation="h",
+                    text_auto=".1f",
+                    color="Soil particle",
+                    title="Estimated soil texture fractions (%)",
+                )
+                fig.update_layout(
+                    template="plotly_white", height=300, showlegend=False,
+                    xaxis=dict(title="Percentage", range=[0, 100], ticksuffix="%"),
+                    margin=dict(l=15, r=15, t=35, b=15),
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            elif not (st.session_state.soil_notice and st.session_state.soil_notice.get("text")):
+                st.warning(
+                    "SoilGrids did not return valid topsoil texture for this pin. "
+                    "This is a data gap, not a system error. Missing cells were left blank."
+                )
+            if soil_values.get("texture_sum_pct") is not None:
+                st.caption(
+                    f"Texture fractions total: {fmt(soil_values['texture_sum_pct'], 1)}%. "
+                    "Small differences from 100% can occur because these are independently modelled estimates."
+                )
+            if soil_values.get("property_errors"):
+                with st.expander("SoilGrids request diagnostics"):
+                    for prop_name, error_text in soil_values["property_errors"].items():
+                        st.write(f"**{prop_name}:** {error_text}")
+            if soil_values.get("sample_distance_m"):
+                st.caption("Nearest valid SoilGrids pixel distance (m): " + ", ".join(
+                    f"{k}: {v if v is not None else 'N/A'}" for k, v in soil_values["sample_distance_m"].items()
+                ))
+            st.caption(
+                "Source: ISRIC SoilGrids 2.0 WCS · 250 m grid · mean prediction · 0–5 cm. "
+                "These are model estimates, not field measurements."
+            )
+        else:
+            st.info(
+                "SoilGrids has not been loaded for this pin yet. "
+                "It loads together with the climate record when a place is chosen."
+            )
 
     st.markdown(
         "[SoilGrids WCS documentation](https://docs.isric.org/globaldata/soilgrids/wcs.html)"
     )
 
 elif page == "Crop Suitability":
+    render_report_rail("left", "Soil", "Soil Analysis")
+    render_report_rail("right", "Rotation", "Crop Rotation")
     hero(
         "Crop suitability screening",
-        "Location-specific preliminary screening using NASA POWER climate data and FAO ECOCROP crop requirements.",
+        "Preliminary screening for the selected pin, using NASA POWER climate data and FAO ECOCROP requirements.",
     )
-    location_current = (
-        not st.session_state.selected_climate.empty
-        and st.session_state.climate_location == (
-            st.session_state.selected_lat, st.session_state.selected_lon
-        )
-    )
-    if location_current and not st.session_state.location_suitability.empty:
+    if not st.session_state.location_chosen:
+        prompt_for_location()
+    elif not climate_is_current():
+        prompt_for_climate()
+    elif st.session_state.location_suitability.empty:
+        st.info("The climate record loaded, but no crop score could be calculated for this pin.")
+    else:
         view = st.session_state.location_suitability.copy()
         st.success(
             f"Climate-based screening for {st.session_state.selected_lat:.4f}, "
@@ -1342,88 +1953,55 @@ elif page == "Crop Suitability":
         for c in ["Temperature fit", "Annual rainfall fit", "Soil pH fit", "Soil texture fit", "Preliminary score"]:
             display[c] = display[c].map(lambda x: "Not available" if pd.isna(x) else fmt(x))
         st.dataframe(display, hide_index=True, use_container_width=True)
-        if "Soil pH fit" in view.columns:
-            zero_ph_rows = view[
-                pd.to_numeric(view["Soil pH fit"], errors="coerce").eq(0)
-            ]
-            if not zero_ph_rows.empty:
-                names = ", ".join(zero_ph_rows["Crop"].astype(str).tolist())
-                st.warning(
-                    f"Soil pH fit is 0 for: {names}. A zero here means the measured pH is "
-                    "outside that crop's ECOCROP absolute pH range; it does not mean the API returned zero."
-                )
-        soil_is_current_for_crop = (
-            st.session_state.selected_soil is not None
-            and st.session_state.soil_location == (
-                st.session_state.selected_lat, st.session_state.selected_lon
-            )
-        )
-        if soil_is_current_for_crop:
+        if soil_is_current():
             current_soil = st.session_state.selected_soil or {}
             has_ph = current_soil.get("phh2o") is not None
             has_texture = bool(current_soil.get("texture_complete"))
             if has_ph and has_texture:
-                st.success(
-                    "SoilGrids pH and complete texture fractions are available for this exact point "
-                    "and are included where the crop has corresponding ECOCROP requirements."
-                )
+                coverage = "Scores include climate, SoilGrids pH, and texture where each crop has an ECOCROP range."
             elif has_ph:
-                st.warning(
-                    f"SoilGrids pH ({fmt(current_soil.get('phh2o'))}) is included, but complete "
-                    "sand/silt/clay data are unavailable. Results are partial-soil screening; "
-                    "texture has not been imputed."
+                coverage = (
+                    f"Scores include climate and SoilGrids pH ({fmt(current_soil.get('phh2o'))}). "
+                    "Texture is incomplete for this pin and was left out."
                 )
             elif has_texture:
-                st.warning(
-                    "Complete SoilGrids texture is included, but pH is unavailable. "
-                    "Results are partial-soil screening."
-                )
+                coverage = "Scores include climate and SoilGrids texture. pH was not available for this pin and was left out."
             else:
-                st.warning(
-                    "SoilGrids returned no complete soil component for this point. "
-                    "Scores use climate data only; missing soil values are not treated as zero."
-                )
+                coverage = "SoilGrids did not return a usable soil value for this pin. Scores use climate only."
         else:
+            coverage = "Scores use the NASA POWER climate record only. SoilGrids did not add pH or texture for this pin."
+        st.caption(
+            coverage + " Cotton and chickpea are not scored until their ECOCROP records are added. "
+            "Weights, when present: temperature 30%, rainfall 25%, pH 20%, texture 25%. "
+            "Missing parts are dropped and the remaining weights are rescaled. "
+            "These are screening indicators, not yield predictions."
+        )
+        if "Eligibility" in view.columns and view["Eligibility"].eq("Outside absolute limits").any():
             st.warning(
-                "These are climate-only preliminary screening scores. "
-                "Load SoilGrids data for this same coordinate to include available soil data."
+                "Some crops cross an ECOCROP absolute limit. Their scores stay visible, "
+                "and those crops are left out of rotation candidates."
             )
-        st.info(
-            "Crop coverage: 6 crops currently have ECOCROP requirement records and are scored. "
-            "Cotton and chickpea are listed in the catalog but are not scored because their "
-            "ecological requirement records are not yet populated."
-        )
-        st.caption(
-            "Scores are preliminary screening indicators, not yield predictions or agronomic prescriptions. "
-            "Weights when available: temperature 30%, annual rainfall 25%, soil pH 20%, and soil texture 25%; "
-            "missing components are excluded and weights are renormalized. Texture is mapped to broad "
-            "light/medium/heavy ECOCROP descriptors. Annual indicators do not replace crop-season or "
-            "field-level assessment."
-        )
-    else:
-        st.info(
-            "No current location-specific screening is available yet. "
-            "Go to Overview, select your point, and load NASA POWER climate data. "
-            "The original Antalya pilot scores are intentionally hidden here to avoid "
-            "presenting them as results for another location."
-        )
-        st.caption(
-            f"Current selected point: {st.session_state.selected_lat:.4f}, "
-            f"{st.session_state.selected_lon:.4f}"
-        )
 
 elif page == "Crop Rotation":
+    render_report_rail("left", "Suitability", "Crop Suitability")
     hero(
         "Crop rotation scenarios",
-        "Three-year candidate sequences recalculated from the selected location's climate-based crop screening.",
+        "Three-year sequences built from the selected pin's crop screening.",
     )
-    location_current = (
-        not st.session_state.selected_climate.empty
-        and st.session_state.climate_location == (
-            st.session_state.selected_lat, st.session_state.selected_lon
+    if not st.session_state.location_chosen:
+        prompt_for_location()
+    elif not climate_is_current():
+        prompt_for_climate()
+    elif st.session_state.location_rotations.empty:
+        st.warning(
+            "No three-year rotation can be built from the crops that pass the screen for this pin. "
+            "SmartCrop does not fill a rotation with crops outside their absolute limits."
         )
-    )
-    if location_current and not st.session_state.location_rotations.empty:
+        st.caption(
+            "Only eligible annual crops are used. Olive is excluded. "
+            "Each crop appears once, and the three years must belong to different crop groups."
+        )
+    else:
         st.success(
             f"Rotation candidates for {st.session_state.selected_lat:.4f}, "
             f"{st.session_state.selected_lon:.4f}"
@@ -1441,27 +2019,9 @@ elif page == "Crop Rotation":
                 )
             with right:
                 st.metric("Mean score", fmt(row["Mean screening score"]))
-        st.warning(
-            "Rotation scenarios are heuristic candidates based on the available climate and soil screening data. "
-            "They do not account for field history, planting calendars, pests, nutrient balances, "
-            "irrigation constraints, or farm economics. They are not agronomic prescriptions."
-        )
-    else:
-        if location_current and not st.session_state.location_suitability.empty:
-            st.warning(
-                "No valid three-year rotation can be generated from the crops that pass the current "
-                "eligibility screen. This is intentional: SmartCrop will not fill a rotation with "
-                "crops outside their absolute climate or soil-pH limits. Try another location or review "
-                "the crop screening inputs."
-            )
-        else:
-            st.info(
-                "Select a point on the Overview map and load its NASA POWER climate data to generate "
-                "location-specific rotation candidates."
-            )
         st.caption(
-            "Only eligible annual crops are considered. Perennial crops such as olive are excluded. "
-            "Each crop appears once and all three years must belong to distinct crop groups."
+            "These are heuristic candidates from the current screening. "
+            "They are not agronomic prescriptions."
         )
 
 elif page == "Data Sources":
