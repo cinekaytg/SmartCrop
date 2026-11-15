@@ -199,10 +199,9 @@ def fetch_nasa_power_climate_normals(latitude, longitude, start_year=1991, end_y
 def fetch_soilgrids_point(latitude, longitude):
     """Fetch 0–5 cm SoilGrids mean estimates via WCS.
 
-    Texture fractions are sampled from the same raster cell so that sand,
-    silt and clay form a coherent composition. Zero is a valid fraction and
-    is therefore not treated as NoData. pH is sampled independently because
-    its coverage can have a different valid-data mask.
+    WCS responses are validated by opening the raster itself, not by relying
+    on the HTTP Content-Type or a narrow TIFF magic-byte check. The server may
+    label a valid GeoTIFF response as image/tiff.
     """
     try:
         import numpy as np
@@ -223,7 +222,9 @@ def fetch_soilgrids_point(latitude, longitude):
     if not (math.isfinite(x) and math.isfinite(y)):
         raise ValueError("Could not project this coordinate into the SoilGrids grid.")
 
-    half_window = 1000.0  # request a 2 km neighbourhood at native 250 m resolution
+    # Request a compact 1 km x 1 km window (native pixels are ~250 m).
+    # Smaller WCS payloads reduce server processing and transfer time.
+    half_window = 500.0
     subsets = [
         ("SUBSET", f"X({x-half_window:.2f},{x+half_window:.2f})"),
         ("SUBSET", f"Y({y-half_window:.2f},{y+half_window:.2f})"),
@@ -231,13 +232,8 @@ def fetch_soilgrids_point(latitude, longitude):
     crs_uri = "http://www.opengis.net/def/crs/EPSG/0/152160"
     properties = {"phh2o": "Soil pH", "sand": "Sand", "silt": "Silt", "clay": "Clay"}
     rasters, failures, distances = {}, {}, {}
-    def get_raster(prop):
-        """Fetch one SoilGrids layer with a bounded timeout.
 
-        The four WCS layers are requested concurrently below. A single bounded
-        request per layer prevents sequential retry delays from leaving the UI
-        apparently loading for several minutes.
-        """
+    def get_raster(prop):
         endpoint = f"https://maps.isric.org/mapserv?map=/map/{prop}.map"
         params = [
             ("SERVICE", "WCS"), ("VERSION", "2.0.1"),
@@ -249,43 +245,48 @@ def fetch_soilgrids_point(latitude, longitude):
         response = requests.get(
             endpoint,
             params=params,
-            headers={"User-Agent": "SmartCrop/1.1 (SoilGrids WCS client)"},
-            timeout=(8, 30),
+            headers={"User-Agent": "SmartCrop/1.2 (SoilGrids WCS client)"},
+            timeout=(10, 60),
         )
         response.raise_for_status()
         content = response.content
+        if not content:
+            raise RuntimeError("SoilGrids returned an empty response.")
 
-        # GeoTIFF classic signatures; reject XML exception documents even on HTTP 200.
-        if content[:4] not in (b"II*\\x00", b"MM\\x00*"):
-            detail = content[:500].decode("utf-8", errors="replace")
+        # Do not reject by Content-Type or TIFF signature: valid TIFF/GeoTIFF
+        # payloads can be labelled image/tiff and may use different TIFF variants.
+        try:
+            with rasterio.io.MemoryFile(content) as memfile:
+                with memfile.open() as ds:
+                    if ds.driver not in ("GTiff", "COG"):
+                        raise RuntimeError(
+                            f"Unsupported raster driver returned by WCS: {ds.driver}"
+                        )
+                    if ds.count < 1 or ds.width < 1 or ds.height < 1:
+                        raise RuntimeError("WCS returned an empty raster.")
+                    arr = ds.read(1, masked=True)
+                    values = np.asarray(arr.filled(np.nan), dtype=float)
+                    valid = np.isfinite(values) & (ds.read_masks(1) > 0)
+                    if ds.nodata is not None:
+                        valid &= values != float(ds.nodata)
+                    if prop == "phh2o":
+                        valid &= (values >= 30) & (values <= 110)
+                    else:
+                        # Zero is a valid fraction; only NoData and out-of-range values are rejected.
+                        valid &= (values >= 0) & (values <= 1000)
+                    return values.copy(), valid.copy(), ds.transform, ds.crs
+        except Exception as exc:
+            content_type = response.headers.get("Content-Type", "unknown")
+            preview = content[:120].hex(" ")
             raise RuntimeError(
-                f"WCS returned {response.headers.get('Content-Type', 'unknown content')} "
-                f"instead of GeoTIFF: {detail[:350]}"
-            )
+                f"Could not open WCS response as a GeoTIFF (HTTP {response.status_code}, "
+                f"Content-Type: {content_type}, bytes: {preview}): {exc}"
+            ) from exc
 
-        with rasterio.io.MemoryFile(content) as memfile:
-            with memfile.open() as ds:
-                arr = ds.read(1, masked=True)
-                values = np.asarray(arr.filled(np.nan), dtype=float)
-                valid = np.isfinite(values) & (ds.read_masks(1) > 0)
-                if ds.nodata is not None:
-                    valid &= values != float(ds.nodata)
-                # Values are integer encoded: pH x10; texture g/kg.
-                if prop == "phh2o":
-                    valid &= (values >= 30) & (values <= 110)
-                else:
-                    # Zero is a valid particle fraction; reject only NoData and out-of-range values.
-                    valid &= (values >= 0) & (values <= 1000)
-                return values.copy(), valid.copy(), ds.transform, ds.crs
-
-    # Parallel requests keep the total wait close to one request timeout,
-    # rather than four sequential 90-second waits.
+    # Parallel requests keep the overall wait bounded by the slowest layer.
     from concurrent.futures import ThreadPoolExecutor, as_completed
-
     with ThreadPoolExecutor(max_workers=4) as executor:
-        future_to_prop = {
-            executor.submit(get_raster, prop): prop for prop in properties
-        }
+        future_to_prop = {executor.submit(get_raster, prop): prop for prop in properties}
         for future in as_completed(future_to_prop):
             prop = future_to_prop[future]
             try:
@@ -294,8 +295,6 @@ def fetch_soilgrids_point(latitude, longitude):
                 failures[prop] = f"{type(exc).__name__}: {exc}"
 
     results = {key: None for key in properties}
-    # Choose one shared pixel for all three texture fractions. This avoids
-    # mixing neighbouring cells when one layer has a slightly different mask.
     texture_props = ("sand", "silt", "clay")
     if all(prop in rasters for prop in texture_props):
         base_values, base_valid, base_transform, base_crs = rasters["sand"]
@@ -324,10 +323,8 @@ def fetch_soilgrids_point(latitude, longitude):
             failures["texture"] = "No common valid pixel for sand, silt and clay in the requested neighbourhood."
     else:
         missing = [prop for prop in texture_props if prop not in rasters]
-        if missing:
-            failures["texture"] = "Unavailable texture layer(s): " + ", ".join(missing)
+        failures["texture"] = "Unavailable texture layer(s): " + ", ".join(missing)
 
-    # pH can use its own nearest valid pixel; it is not part of the texture sum.
     if "phh2o" in rasters:
         values, valid, transform, _ = rasters["phh2o"]
         if valid.any():
@@ -339,6 +336,8 @@ def fetch_soilgrids_point(latitude, longitude):
             best = int(np.argmin(dists))
             results["phh2o"] = float(values[rows[best], cols[best]]) / 10.0
             distances["phh2o"] = round(float(dists[best]), 1)
+        else:
+            failures["phh2o"] = "Raster opened, but no valid pH pixels were present in the requested window."
 
     if all(results.get(k) is None for k in properties):
         detail = "; ".join(f"{properties.get(k, k)}: {v}" for k, v in failures.items())
@@ -347,8 +346,6 @@ def fetch_soilgrids_point(latitude, longitude):
     texture_complete = all(results.get(k) is not None for k in texture_props)
     if texture_complete:
         texture_sum = sum(results[k] for k in texture_props)
-        # Independently modelled fractions should be close to 100%; reject
-        # incomplete/misaligned responses rather than silently normalising them.
         if 85.0 <= texture_sum <= 115.0:
             results["texture_sum_pct"] = texture_sum
         else:
@@ -356,7 +353,10 @@ def fetch_soilgrids_point(latitude, longitude):
                 results[prop] = None
                 distances[prop] = None
             results["texture_sum_pct"] = None
-            failures["texture"] = f"Texture fractions totalled {texture_sum:.1f}%, outside the 85–115% validation range."
+            failures["texture"] = (
+                f"Texture fractions totalled {texture_sum:.1f}%, outside the 85–115% validation range."
+            )
+            texture_complete = False
     else:
         results["texture_sum_pct"] = None
 
@@ -365,7 +365,7 @@ def fetch_soilgrids_point(latitude, longitude):
     results["depth"] = "0–5 cm"
     results["source"] = "ISRIC SoilGrids 2.0 WCS"
     results["quantile"] = "Mean"
-    results["texture_complete"] = texture_complete and results["texture_sum_pct"] is not None
+    results["texture_complete"] = texture_complete
     return results
 
 
