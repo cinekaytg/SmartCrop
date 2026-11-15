@@ -828,18 +828,23 @@ if page == "Overview":
             st.session_state.selected_lat, st.session_state.selected_lon
         )
     )
+    # Only show location-specific screening after climate data have been loaded
+    # for the exact currently selected coordinates. Never fall back to the
+    # static Antalya pilot scores for an unrelated global point.
     if overview_location_current and not st.session_state.location_suitability.empty:
         overview_scores = st.session_state.location_suitability.copy()
         overview_name_col = "Crop"
         overview_score_col = "Preliminary score"
         overview_rotation_count = len(st.session_state.location_rotations)
         overview_climate_count = len(st.session_state.selected_climate)
+        screening_calculated = True
     else:
-        overview_scores = suit.copy()
-        overview_name_col = col(overview_scores, ["crop_name_en", "crop_name", "name_en", "crop_id"])
-        overview_score_col = col(overview_scores, ["preliminary_screening_score", "preliminary_score"])
-        overview_rotation_count = len(rotation)
-        overview_climate_count = len(climate)
+        overview_scores = pd.DataFrame()
+        overview_name_col = None
+        overview_score_col = None
+        overview_rotation_count = 0
+        overview_climate_count = 0
+        screening_calculated = False
 
     valid_scores = (
         pd.to_numeric(overview_scores[overview_score_col], errors="coerce").notna().sum()
@@ -847,9 +852,9 @@ if page == "Overview":
     )
     a, b, c, d = st.columns(4)
     a.metric("Selected point", "Global")
-    b.metric("Climate records", f"{overview_climate_count} months" if overview_climate_count else "Unavailable")
-    c.metric("Scored crops", str(valid_scores))
-    d.metric("Rotation candidates", str(overview_rotation_count))
+    b.metric("Climate records", f"{overview_climate_count} months" if screening_calculated else "Not loaded")
+    c.metric("Scored crops", str(valid_scores) if screening_calculated else "Not calculated")
+    d.metric("Rotation candidates", str(overview_rotation_count) if screening_calculated else "Not calculated")
 
     left, right = st.columns([1.12, 1])
     with left:
@@ -962,7 +967,7 @@ if page == "Overview":
                 "Original Antalya pilot assessment · load climate data for the selected point "
                 "to refresh this table"
             )
-        if overview_score_col and overview_name_col and not overview_scores.empty:
+        if screening_calculated and overview_score_col and overview_name_col and not overview_scores.empty:
             view = overview_scores[[overview_name_col, overview_score_col]].copy()
             view[overview_score_col] = pd.to_numeric(view[overview_score_col], errors="coerce")
             view = view.dropna().sort_values(overview_score_col, ascending=False)
@@ -971,7 +976,10 @@ if page == "Overview":
             view["Preliminary score"] = view["Preliminary score"].map(lambda x: fmt(x))
             st.dataframe(view, hide_index=True, use_container_width=True)
         else:
-            st.info("Crop screening results are not available.")
+            st.info(
+                "Crop scores have not been calculated for this point yet. "
+                "Load NASA POWER climate data for the selected coordinates to calculate crop suitability and rotation candidates."
+            )
     st.info(
         "Climate data can be requested for a selected global point and use a 1991–2020, 30-year reference period. "
         "The reference period is a historical climate baseline, not a forecast. NASA POWER grid resolution varies by parameter; SoilGrids data are retrieved separately for the selected point."
