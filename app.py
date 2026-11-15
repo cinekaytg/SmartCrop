@@ -259,14 +259,18 @@ def fetch_soilgrids_point(latitude, longitude):
                 with memfile.open() as dataset:
                     band = dataset.read(1, masked=True)
                     values = np.asarray(band.filled(np.nan), dtype=float)
-                    valid = np.isfinite(values)
+                    valid = np.isfinite(values) & (dataset.read_masks(1) > 0)
                     if dataset.nodata is not None:
                         valid &= values != float(dataset.nodata)
                     # Soil pH is encoded as pH × 10; zero is not a plausible pH.
                     if prop == "phh2o":
                         valid &= (values >= 30) & (values <= 110)
                     else:
-                        valid &= (values >= 0) & (values <= 1000)
+                        # Soil texture is stored as g/kg (0–1000) and converted
+                        # to percent by dividing by 10. A zero-valued pixel is
+                        # not a credible complete texture estimate; treating it
+                        # as valid caused empty, zero-width charts at some points.
+                        valid &= (values > 0) & (values <= 1000)
 
                     if not valid.any():
                         raise ValueError("No valid pixel in the requested neighbourhood.")
@@ -296,7 +300,19 @@ def fetch_soilgrids_point(latitude, longitude):
 
     if available_texture:
         texture_sum = results["sand"] + results["silt"] + results["clay"]
-        results["texture_sum_pct"] = texture_sum
+        # A very low/high total usually indicates a bad or misaligned raster
+        # response; do not present it as a valid texture composition.
+        if 70.0 <= texture_sum <= 130.0:
+            results["texture_sum_pct"] = texture_sum
+        else:
+            for prop in ("sand", "silt", "clay"):
+                results[prop] = None
+                distances[prop] = None
+            results["texture_sum_pct"] = None
+            failures["texture"] = (
+                f"Texture fractions summed to {texture_sum:.1f}%, outside the "
+                "expected broad validation range (70–130%)."
+            )
     else:
         results["texture_sum_pct"] = None
 
@@ -911,7 +927,10 @@ elif page == "Soil Analysis":
             "silt": soil_values.get("silt"),
             "clay": soil_values.get("clay"),
         }
-        available_texture = {k: v for k, v in texture_values.items() if v is not None}
+        available_texture = {
+            k: float(v) for k, v in texture_values.items()
+            if v is not None and pd.notna(v) and 0 < float(v) <= 100
+        }
         if available_texture:
             texture_df = pd.DataFrame({
                 "Soil particle": [k.capitalize() for k in available_texture],
@@ -929,9 +948,16 @@ elif page == "Soil Analysis":
             )
             fig.update_layout(
                 template="plotly_white", height=300, showlegend=False,
+                xaxis=dict(title="Percentage", range=[0, 100], ticksuffix="%"),
                 margin=dict(l=15, r=15, t=35, b=15),
             )
             st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning(
+                "SoilGrids did not return valid topsoil texture values for this point. "
+                "The zero or missing raster cells were rejected instead of being shown "
+                "as 0%. Try a nearby point or reload the soil data."
+            )
         if soil_values.get("texture_sum_pct") is not None:
             st.caption(
                 f"Texture fractions total: {fmt(soil_values['texture_sum_pct'], 1)}%. "
