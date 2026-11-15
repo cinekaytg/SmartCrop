@@ -439,27 +439,38 @@ def range_fit(value, opt_min, opt_max, abs_min, abs_max):
 
 
 def build_location_suitability(climate_df, ecological, catalog, soil_ph=None):
-    """Build a location-specific preliminary screening from available data only."""
+    """
+    Transparent location screening.
+    Uses 1991-2020 annual climate normals and ECOCROP annual limits.
+    A crop outside any available absolute limit is marked ineligible.
+    """
     if climate_df.empty or ecological.empty:
         return pd.DataFrame()
+
     temp_col = col(climate_df, ["avg_temperature"])
     rain_col = col(climate_df, ["total_rainfall"])
     if not temp_col or not rain_col:
         return pd.DataFrame()
+
     temperature_values = pd.to_numeric(climate_df[temp_col], errors="coerce")
     rainfall_values = pd.to_numeric(climate_df[rain_col], errors="coerce")
     days_col = col(climate_df, ["days_in_month"])
+
     if days_col:
         day_weights = pd.to_numeric(climate_df[days_col], errors="coerce")
         valid_temp = temperature_values.notna() & day_weights.notna()
         annual_temp = (
             (temperature_values[valid_temp] * day_weights[valid_temp]).sum()
             / day_weights[valid_temp].sum()
-            if valid_temp.any() else float("nan")
+            if valid_temp.any() and day_weights[valid_temp].sum() > 0
+            else float("nan")
         )
     else:
         annual_temp = temperature_values.mean()
+
     annual_rain = rainfall_values.sum(min_count=1)
+    ph_available = soil_ph is not None and not pd.isna(soil_ph)
+
     rows = []
     for _, crop in ecological.iterrows():
         temp_score = range_fit(
@@ -472,16 +483,51 @@ def build_location_suitability(climate_df, ecological, catalog, soil_ph=None):
             crop.get("annual_rain_abs_min_mm"), crop.get("annual_rain_abs_max_mm")
         )
         ph_score = None
-        if soil_ph is not None and not pd.isna(soil_ph):
+        if ph_available:
             ph_score = range_fit(
                 float(soil_ph), crop.get("ph_opt_min"), crop.get("ph_opt_max"),
                 crop.get("ph_abs_min"), crop.get("ph_abs_max")
             )
-        components = [v for v in [temp_score, rain_score, ph_score] if v is not None]
-        score = sum(components) / len(components) if components else None
+
+        # Hard eligibility gate: a high pH/rainfall score cannot hide a crop
+        # falling outside the absolute temperature or rainfall tolerance.
+        critical_scores = [temp_score, rain_score]
+        if ph_available:
+            critical_scores.append(ph_score)
+        critical_data_complete = all(v is not None for v in critical_scores)
+        outside_absolute_limit = (
+            critical_data_complete and any(float(v) <= 0 for v in critical_scores)
+        )
+
+        # Weighted score: temperature 40%, annual rainfall 35%, soil pH 25%.
+        # If pH is unavailable, climate-only weights are re-normalized.
+        weighted_parts = []
+        if temp_score is not None:
+            weighted_parts.append((float(temp_score), 0.40))
+        if rain_score is not None:
+            weighted_parts.append((float(rain_score), 0.35))
+        if ph_score is not None:
+            weighted_parts.append((float(ph_score), 0.25))
+        weight_total = sum(weight for _, weight in weighted_parts)
+        weighted_score = (
+            sum(value * weight for value, weight in weighted_parts) / weight_total
+            if weight_total else None
+        )
+        score = 0.0 if outside_absolute_limit else weighted_score
+
         cat = catalog[catalog["crop_id"] == crop["crop_id"]]
         crop_name = cat.iloc[0]["crop_name_en"] if not cat.empty else str(crop["crop_id"]).title()
         crop_group = cat.iloc[0]["crop_group"] if not cat.empty else "Unknown"
+
+        if outside_absolute_limit:
+            eligibility = "Outside absolute limits"
+        elif not critical_data_complete:
+            eligibility = "Incomplete data"
+        elif ph_available:
+            eligibility = "Eligible for screening"
+        else:
+            eligibility = "Climate-only screening"
+
         rows.append({
             "crop_id": crop["crop_id"],
             "Crop": crop_name,
@@ -490,32 +536,78 @@ def build_location_suitability(climate_df, ecological, catalog, soil_ph=None):
             "Annual rainfall fit": rain_score,
             "Soil pH fit": ph_score,
             "Preliminary score": score,
-            "Data components": len(components),
+            "Eligibility": eligibility,
+            "Data components": sum(v is not None for v in [temp_score, rain_score, ph_score]),
         })
+
     result = pd.DataFrame(rows)
-    return result.sort_values("Preliminary score", ascending=False, na_position="last")
+    return result.sort_values(
+        ["Preliminary score", "Crop"], ascending=[False, True], na_position="last"
+    )
 
 
 def build_location_rotations(suitability):
-    """Generate 3-year non-repeating sequences with no adjacent same crop group."""
+    """
+    Build three-year illustrative rotations from eligible annual crops only.
+    Perennial crops (including olive) are excluded. Crops cannot repeat and
+    adjacent years cannot use the same crop group.
+    """
     if suitability.empty:
         return pd.DataFrame()
-    valid = suitability.dropna(subset=["Preliminary score"]).to_dict("records")
+
+    candidates_source = suitability.copy()
+    if "Eligibility" in candidates_source.columns:
+        candidates_source = candidates_source[
+            candidates_source["Eligibility"].isin(
+                ["Eligible for screening", "Climate-only screening"]
+            )
+        ]
+
+    # Explicit perennial exclusions. These crops belong in orchard planning,
+    # not annual field-rotation sequences.
+    perennial_ids = {"olive"}
+    perennial_groups = {"fruit", "perennial", "tree crop", "orchard"}
+    candidates_source = candidates_source[
+        ~candidates_source["crop_id"].astype(str).str.lower().isin(perennial_ids)
+        & ~candidates_source["Crop group"].astype(str).str.lower().isin(perennial_groups)
+    ]
+
+    valid = candidates_source.dropna(subset=["Preliminary score"]).to_dict("records")
+    if len(valid) < 3:
+        return pd.DataFrame()
+
     candidates = []
     for a, b, c in itertools.permutations(valid, 3):
-        if a["crop_id"] == b["crop_id"] or b["crop_id"] == c["crop_id"] or a["crop_id"] == c["crop_id"]:
+        ids = [str(a["crop_id"]), str(b["crop_id"]), str(c["crop_id"])]
+        groups = [str(a["Crop group"]), str(b["Crop group"]), str(c["Crop group"])]
+        if len(set(ids)) != 3:
             continue
-        if a["Crop group"] == b["Crop group"] or b["Crop group"] == c["Crop group"]:
+        if groups[0].lower() == groups[1].lower() or groups[1].lower() == groups[2].lower():
             continue
-        scores = [a["Preliminary score"], b["Preliminary score"], c["Preliminary score"]]
+
+        scores = [float(a["Preliminary score"]), float(b["Preliminary score"]), float(c["Preliminary score"])]
+        # Stable tie-break: prefer sequences with three distinct crop groups,
+        # then use names for reproducible ordering.
+        diversity = len(set(group.lower() for group in groups))
         candidates.append({
-            "Year 1": a["Crop"], "Year 2": b["Crop"], "Year 3": c["Crop"],
-            "Crop group sequence": f'{a["Crop group"]} → {b["Crop group"]} → {c["Crop group"]}',
+            "Year 1": a["Crop"],
+            "Year 2": b["Crop"],
+            "Year 3": c["Crop"],
+            "Crop group sequence": f'{groups[0]} → {groups[1]} → {groups[2]}',
             "Mean screening score": sum(scores) / 3,
+            "Group diversity": diversity,
+            "Sequence key": " | ".join(ids),
         })
-    return pd.DataFrame(candidates).sort_values(
-        "Mean screening score", ascending=False
-    ).head(15) if candidates else pd.DataFrame()
+
+    if not candidates:
+        return pd.DataFrame()
+
+    result = pd.DataFrame(candidates).sort_values(
+        ["Mean screening score", "Group diversity", "Sequence key"],
+        ascending=[False, False, True],
+        kind="mergesort",
+    ).head(15)
+    return result.drop(columns=["Group diversity", "Sequence key"]).reset_index(drop=True)
 
 
 if not DB_PATH.exists():
@@ -1034,7 +1126,9 @@ elif page == "Crop Suitability":
             )
         st.caption(
             "Scores are screening indicators, not yield predictions or agronomic prescriptions. "
-            "The current model uses annual climate indicators and available ECOCROP ranges."
+            "Temperature (40%), annual rainfall (35%), and soil pH (25%) are weighted when available. "
+            "Crops outside any available absolute ECOCROP limit are marked ineligible. "
+            "Annual indicators do not replace crop-season or field-level assessment."
         )
     else:
         st.info(
@@ -1083,12 +1177,22 @@ elif page == "Crop Rotation":
             "irrigation constraints, or farm economics. They are not agronomic prescriptions."
         )
     else:
-        st.info(
-            "Select a point on the Overview map and load its NASA POWER climate data to generate "
-            "location-specific rotation candidates. The database rotation table is the original Antalya pilot."
+        if location_current and not st.session_state.location_suitability.empty:
+            st.warning(
+                "No valid three-year rotation can be generated from the crops that pass the current "
+                "eligibility screen. This is intentional: SmartCrop will not fill a rotation with "
+                "crops outside their absolute climate or soil-pH limits. Try another location or review "
+                "the crop screening inputs."
+            )
+        else:
+            st.info(
+                "Select a point on the Overview map and load its NASA POWER climate data to generate "
+                "location-specific rotation candidates."
+            )
+        st.caption(
+            "Only eligible annual crops are considered. Perennial crops such as olive are excluded. "
+            "Each crop appears once, and adjacent years must belong to different crop groups."
         )
-        if not rotation.empty:
-            st.dataframe(rotation, hide_index=True, use_container_width=True)
 
 elif page == "Data Sources":
     hero(
