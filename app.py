@@ -577,6 +577,125 @@ html, body, [class*="css"] {font-family:'DM Sans',sans-serif;}
 .st-key-rail_climate button:focus div {
   color:#10382d !important;
 }
+.st-key-mobile_menu_btn {display:none !important;}
+@media (max-width: 820px) {
+  [data-testid="stMainBlockContainer"] {padding-top:82px !important;}
+  .st-key-mobile_menu_btn {
+    display:block !important;
+    position:absolute !important;
+    top:10px;
+    right:12px;
+    width:44px !important;
+    height:44px !important;
+    min-height:0 !important;
+    margin:0 !important;
+    z-index:5;
+  }
+  .st-key-mobile_menu_btn button {
+    width:44px;
+    height:44px;
+    min-height:44px;
+    padding:0;
+    background:rgba(255,255,255,.08);
+    border:1px solid rgba(255,255,255,.22);
+    border-radius:12px;
+  }
+  .st-key-mobile_menu_btn button p {color:#f4f8f4 !important;font-size:22px;line-height:1;}
+  .st-key-topnav [data-testid="stColumn"]:nth-child(1) {
+    min-height:48px !important;
+    padding-right:56px;
+    box-sizing:border-box;
+  }
+  .st-key-topnav [data-testid="stColumn"]:nth-child(2) {display:none !important;}
+  .st-key-topnav:has(#mobile-menu-open) [data-testid="stColumn"]:nth-child(2) {
+    display:flex !important;
+    width:100% !important;
+  }
+  .st-key-topnav:has(#mobile-menu-open) [data-testid="stRadio"] > div[role="radiogroup"] {
+    flex-direction:column !important;
+    align-items:stretch !important;
+    overflow:visible;
+  }
+  .st-key-topnav:has(#mobile-menu-open) [data-testid="stRadio"] [role="radiogroup"] label {
+    width:100%;
+    justify-content:flex-start !important;
+  }
+  .st-key-topnav {
+    height:auto;
+    min-height:0;
+    padding:8px 12px 10px;
+    align-items:stretch;
+  }
+  .st-key-topnav [data-testid="stHorizontalBlock"],
+  .st-key-topnav [data-testid="stColumn"],
+  .st-key-topnav [data-testid="stColumn"]:nth-child(2),
+  .st-key-topnav [data-testid="stColumn"]:nth-child(2) [data-testid="stVerticalBlock"],
+  .st-key-topnav [data-testid="stColumn"]:nth-child(2) [data-testid="stElementContainer"],
+  .st-key-topnav [data-testid="stRadio"],
+  .st-key-topnav [data-testid="stRadio"] > div,
+  .st-key-topnav [role="radiogroup"] {
+    height:auto !important;
+    min-height:0 !important;
+  }
+  .st-key-topnav [data-testid="stHorizontalBlock"] {flex-wrap:wrap !important;row-gap:6px;}
+  .st-key-topnav [data-testid="stColumn"] {
+    width:100% !important;
+    flex:1 1 100% !important;
+    min-width:0 !important;
+  }
+  .st-key-topnav [data-testid="stRadio"] > div[role="radiogroup"] {
+    justify-content:flex-start !important;
+    overflow-x:auto;
+    padding-bottom:2px;
+  }
+  .st-key-topnav [data-testid="stRadio"] [role="radiogroup"] label {
+    height:40px !important;
+    min-height:40px !important;
+    padding:0 12px !important;
+  }
+  .st-key-open_location button {min-height:44px;width:100%;}
+  .hero {padding:18px 16px;}
+  .hero h1 {font-size:1.55rem;}
+  .st-key-rail_soil, .st-key-rail_climate {
+    top:auto;
+    bottom:0;
+    height:64px;
+    width:50%;
+    overflow:hidden;
+  }
+  .st-key-rail_climate {left:0;right:auto;}
+  .st-key-rail_soil {right:0;left:auto;box-shadow:inset 1px 0 0 rgba(255,255,255,.18);}
+  body:not(:has(.st-key-rail_soil)) .st-key-rail_climate,
+  body:not(:has(.st-key-rail_climate)) .st-key-rail_soil {
+    width:100%;
+    left:0;
+    right:0;
+    box-shadow:none;
+  }
+  .st-key-rail_soil button, .st-key-rail_climate button {
+    width:100%;
+    height:64px;
+    min-height:64px;
+    overflow:hidden !important;
+  }
+  .st-key-rail_soil button [data-testid="stMarkdownContainer"],
+  .st-key-rail_climate button [data-testid="stMarkdownContainer"] {
+    transform:none !important;
+    width:auto !important;
+    max-width:100% !important;
+  }
+  .st-key-rail_climate button [data-testid="stMarkdownContainer"]::after,
+  .st-key-rail_soil button [data-testid="stMarkdownContainer"]::after {
+    content:none !important;
+    display:none !important;
+  }
+  .st-key-rail_climate button p::before {content:"←  ";}
+  .st-key-rail_soil button p::after {content:"  →";}
+  .st-key-rail_soil button p, .st-key-rail_climate button p {
+    font-size:15px;
+    letter-spacing:0;
+  }
+}
 .brand {display:flex;align-items:center;gap:8px;color:#f4f8f4;padding-top:0;}
 .brand strong {font-family:Manrope,sans-serif;font-size:1.15rem;display:block;line-height:1.1;}
 .brand small {color:#b7d7c4;font-size:.72rem;letter-spacing:.4px;}
@@ -751,6 +870,12 @@ def render_topnav():
         "Data Sources",
     ]
     with st.container(key="topnav"):
+        menu_open = bool(st.session_state.get("mobile_menu_open"))
+        if st.button("✕" if menu_open else "☰", key="mobile_menu_btn", help="Menu"):
+            st.session_state.mobile_menu_open = not menu_open
+            st.rerun()
+        if st.session_state.get("mobile_menu_open"):
+            st.markdown('<div id="mobile-menu-open"></div>', unsafe_allow_html=True)
         brand, nav, place = st.columns([1.05, 5.4, 2.15], vertical_alignment="center")
         with brand:
             st.markdown(
@@ -773,6 +898,11 @@ def render_topnav():
                     "Data Sources": "Sources",
                 }.get(name, name),
             )
+            if st.session_state.get("_menu_for_page") not in (None, page):
+                st.session_state.mobile_menu_open = False
+                st.session_state._menu_for_page = page
+                st.rerun()
+            st.session_state._menu_for_page = page
         with place:
             reopen_location = render_selected_place()
     return page, reopen_location
@@ -1121,7 +1251,16 @@ def prompt_for_location():
 def render_report_rail(side, label, target):
     """Full-height green rail. Right continues the report, left returns."""
     st.markdown(
-        "<style>[data-testid='stMainBlockContainer']{padding-left:96px !important;padding-right:96px !important;}</style>",
+        """
+        <style>
+        @media (min-width: 821px) {
+          [data-testid='stMainBlockContainer']{padding-left:96px !important;padding-right:96px !important;}
+        }
+        @media (max-width: 820px) {
+          [data-testid='stMainBlockContainer']{padding-left:12px !important;padding-right:12px !important;padding-bottom:84px !important;}
+        }
+        </style>
+        """,
         unsafe_allow_html=True,
     )
     key = "rail_soil" if side == "right" else "rail_climate"
